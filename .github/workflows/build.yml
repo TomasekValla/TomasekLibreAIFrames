@@ -96,6 +96,31 @@ jobs:
           cp LICENSE THIRD_PARTY_NOTICES.md README.md dist/
           (cd dist && zip -qry "TomasekLibreAIFrames-${{ matrix.name }}.zip" TomasekLibreAIFrames.app LICENSE THIRD_PARTY_NOTICES.md README.md && shasum -a 256 "TomasekLibreAIFrames-${{ matrix.name }}.zip" > "TomasekLibreAIFrames-${{ matrix.name }}.zip.sha256")
 
+      # Run the packaged program the way a user would: a missing library fails here, not on their machine.
+      - name: Smoke test (Windows)
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process "dist\TomasekLibreAIFrames-${{ matrix.name }}\TomasekLibreAIFrames.exe" -ArgumentList "--help" -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { throw "the packaged program did not start (exit $($p.ExitCode))" }
+
+      - name: Smoke test (Linux)
+        if: matrix.kind == 'linux'
+        run: |
+          d="dist/TomasekLibreAIFrames-${{ matrix.name }}"
+          ldd "$d/TomasekLibreAIFrames" | tee /dev/stderr | grep -q "not found" && { echo "missing library"; exit 1; } || true
+          "$d/TomasekLibreAIFrames" --help
+
+      - name: Smoke test (macOS)
+        if: matrix.kind == 'macos'
+        run: |
+          bin="dist/TomasekLibreAIFrames.app/Contents/MacOS/TomasekLibreAIFrames"
+          otool -L "$bin"
+          otool -l "$bin" | grep -A2 LC_RPATH
+          # Only system libraries and our own folder: nothing from Homebrew or the build machine.
+          if otool -L "$bin" | tail -n +2 | grep -v -E "^\s*(/usr/lib/|/System/Library/|@rpath/|@executable_path/)"; then echo "depends on a library outside the app"; exit 1; fi
+          "$bin" --help
+
       - uses: actions/upload-artifact@v4
         with:
           name: TomasekLibreAIFrames-${{ matrix.name }}

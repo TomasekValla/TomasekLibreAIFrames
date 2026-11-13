@@ -3487,7 +3487,7 @@ dependencies = [
 
 [[package]]
 name = "tomasek-libre-ai-frames"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "eframe",

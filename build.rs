@@ -12,6 +12,13 @@ fn main() {
             println!("cargo:warning=icon not embedded: {e}");
         }
     }
+    // Shared libraries that ship next to the program (WebGPU/Dawn, ONNX Runtime providers) are found
+    // through the rpath: without it macOS and Linux refuse to start ("Library not loaded").
+    match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("macos") => println!("cargo:rustc-link-arg-bins=-Wl,-rpath,@executable_path"),
+        Ok("linux") => println!("cargo:rustc-link-arg-bins=-Wl,-rpath,$ORIGIN"),
+        _ => {}
+    }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         if let Ok(o) = std::process::Command::new("clang").arg("--print-runtime-dir").output() {
             let dir = String::from_utf8_lossy(&o.stdout).trim().to_string();
