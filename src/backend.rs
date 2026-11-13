@@ -87,8 +87,11 @@ pub fn resolve(wanted: Option<Ai>) -> Ai {
 
 /// Execution providers for a session. `error_on_failure` so a broken GPU setup is reported instead of silently
 /// running on the CPU - the caller decides about the CPU fallback.
-pub fn providers(ai: Ai, device: i32, cache_dir: &std::path::Path) -> Vec<ort::ep::ExecutionProviderDispatch> {
-    let _ = (device, cache_dir);
+/// `nchw`: WebGPU with the NCHW layout. Its default NHWC convolution computes wrong results for some
+/// shapes (3x3 stride-2 convolutions with input channels not divisible by 4: RIFE 4.26 Heavy melted);
+/// NCHW is correct but slower, so it is only used when the self-check finds a problem.
+pub fn providers(ai: Ai, device: i32, cache_dir: &std::path::Path, nchw: bool) -> Vec<ort::ep::ExecutionProviderDispatch> {
+    let _ = (device, cache_dir, nchw);
     match ai {
         #[cfg(windows)]
         Ai::DirectMl => vec![ort::ep::DirectML::default().with_device_id(device.max(0)).build().error_on_failure()],
@@ -107,7 +110,11 @@ pub fn providers(ai: Ai, device: i32, cache_dir: &std::path::Path) -> Vec<ort::e
             .build()
             .error_on_failure()],
         #[cfg(any(feature = "webgpu", target_os = "macos"))]
-        Ai::WebGpu => vec![ort::ep::WebGPU::default().build().error_on_failure()],
+        Ai::WebGpu => {
+            let ep = ort::ep::WebGPU::default();
+            let ep = if nchw { ep.with_preferred_layout(ort::ep::webgpu::PreferredLayout::NCHW) } else { ep };
+            vec![ep.build().error_on_failure()]
+        }
         #[cfg(feature = "cuda")]
         Ai::TensorRt => vec![
             ort::ep::TensorRT::default()

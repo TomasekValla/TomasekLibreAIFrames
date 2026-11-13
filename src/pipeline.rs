@@ -296,7 +296,8 @@ impl Nets {
             if let Some((_, net)) = n {
                 parts.push(format!("{what} on {}", net.used.short()));
                 if let Some(r) = &net.fallback_reason {
-                    notes.push(format!("The {what} model fell back from {} to the CPU - much slower. Reason: {r}", self.target.ai.short()));
+                    let slower = if net.used == crate::backend::Ai::Cpu { " - much slower" } else { "" };
+                    notes.push(format!("The {what} model fell back from {} to {}{slower}. Reason: {r}", self.target.ai.short(), net.used.short()));
                 }
             }
         }

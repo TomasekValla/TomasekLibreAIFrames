@@ -276,11 +276,11 @@ fn max_pixels(ai: Ai) -> Option<usize> {
     }
 }
 
-fn session(env: &ort::environment::Environment, path: &Path, t: &Target, ai: Ai) -> Result<Session> {
+fn session(env: &ort::environment::Environment, path: &Path, t: &Target, ai: Ai, nchw: bool) -> Result<Session> {
     let err = |e: ort::Error<ort::session::builder::SessionBuilder>| anyhow!("{e}");
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let mut b = Session::builder(env)?
-        .with_execution_providers(backend::providers(ai, t.device, &t.cache_dir))
+        .with_execution_providers(backend::providers(ai, t.device, &t.cache_dir, nchw))
         .map_err(err)?
         // DirectML requires memory patterns off; WebGPU and CoreML get fixed shapes below, keep it off there too.
         .with_memory_pattern(matches!(ai, Ai::Cpu | Ai::Cuda | Ai::TensorRt | Ai::MiGraphX))
@@ -307,6 +307,122 @@ fn session(env: &ort::environment::Environment, path: &Path, t: &Target, ai: Ai)
         .map_err(|e| anyhow!("{}: {e}", ai.short()))
 }
 
+/// Backends (and WebGPU layouts) to try for a model, in order.
+fn backend_order(t: &Target) -> Vec<(Ai, bool)> {
+    let mut v = vec![(t.ai, false)];
+    if t.ai == Ai::WebGpu {
+        v.push((Ai::WebGpu, true));
+    }
+    #[cfg(target_os = "macos")]
+    match t.ai {
+        Ai::WebGpu => v.push((Ai::CoreMl, false)),
+        Ai::CoreMl => v.extend([(Ai::WebGpu, false), (Ai::WebGpu, true)]),
+        _ => {}
+    }
+    if t.ai.is_gpu() && t.cpu_fallback {
+        v.push((Ai::Cpu, false));
+    }
+    v
+}
+
+/// WebGPU and CoreML have produced wrong images without any error (an M4 Mac showed melted tiles), so
+/// their results are compared with the CPU once per model. TLAF_SELFCHECK=1 checks every GPU backend.
+fn needs_self_check(ai: Ai) -> bool {
+    ai != Ai::Cpu && (matches!(ai, Ai::WebGpu | Ai::CoreMl) || std::env::var_os("TLAF_SELFCHECK").is_some())
+}
+
+static CHECK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run one test tile on the GPU session and on the CPU and compare. The verdict is cached per model,
+/// tile size, backend and app version in cache_dir/gpu-check.json.
+fn self_check(env: &ort::environment::Environment, path: &Path, t: &Target, ai: Ai, nchw: bool, gpu: &mut Session) -> Result<()> {
+    let input = gpu.inputs().first().ok_or_else(|| anyhow!("model has no input"))?;
+    let f16 = input.dtype().tensor_type() == Some(TensorElementType::Float16);
+    let dims: Vec<i64> = input.dtype().tensor_shape().map(|s| s.iter().copied().collect()).unwrap_or_default();
+    let chans = dims.get(1).copied().filter(|&c| c > 0).unwrap_or(3) as usize;
+    let (h, w) = match (dims.get(2), dims.get(3)) {
+        (Some(&h), Some(&w)) if h > 0 && w > 0 => (h as usize, w as usize),
+        _ => (256, 256),
+    };
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let key = format!("{name}|{w}x{h}|{}{}|{}", ai.short(), if nchw { "-NCHW" } else { "" }, crate::update::current_version());
+    let file = t.cache_dir.join("gpu-check.json");
+    let fake_bad = std::env::var_os("TLAF_SELFCHECK_FAKE_BAD").is_some();
+    if !fake_bad {
+        let _g = CHECK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cache: std::collections::HashMap<String, String> = std::fs::read_to_string(&file).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        match cache.get(&key).map(String::as_str) {
+            Some("ok") => return Ok(()),
+            Some(bad) if !bad.is_empty() => return Err(anyhow!("{bad}")),
+            _ => {}
+        }
+    }
+
+    // A test picture with smooth areas, fine detail and edges; for interpolation the second frame is
+    // the first one moved by a few pixels.
+    let pic = |dx: f32| {
+        let mut p = Planar::new(3, w, h);
+        for c in 0..3 {
+            for y in 0..h {
+                for x in 0..w {
+                    let (xf, yf) = (x as f32 + dx, y as f32);
+                    let v = 0.5 + 0.25 * (xf * 0.031 + c as f32).sin() * (yf * 0.047).cos() + if ((xf as i32 / 37) + (y as i32 / 41)) % 2 == 0 { 0.15 } else { -0.15 };
+                    p.data[(c * h + y) * w + x] = v.clamp(0.0, 1.0);
+                }
+            }
+        }
+        p
+    };
+    let x = if chans == 7 {
+        let (a, b) = (pic(0.0), pic(6.0));
+        let mut x = Planar::new(7, w, h);
+        x.data[..3 * w * h].copy_from_slice(&a.data);
+        x.data[3 * w * h..6 * w * h].copy_from_slice(&b.data);
+        x.data[6 * w * h..].fill(0.5);
+        x
+    } else {
+        pic(0.0)
+    };
+    eprintln!("checking that {} computes {name} correctly (once)...", ai.short());
+    let mut g = run_session(gpu, f16, &x)?;
+    if fake_bad {
+        for (i, v) in g.data.iter_mut().enumerate() {
+            if (i / 7) % 3 == 0 {
+                *v = 1.0 - *v;
+            }
+        }
+    }
+    let mut cpu = session(env, path, t, Ai::Cpu, false)?;
+    let c = run_session(&mut cpu, f16, &x)?;
+    let verdict = if g.data.len() != c.data.len() {
+        format!("{} returned a different output size than the CPU", ai.short())
+    } else {
+        let n = c.data.len() as f64;
+        let mean = g.data.iter().zip(&c.data).map(|(a, b)| ((a - b).abs() * 255.0) as f64).sum::<f64>() / n;
+        let off = g.data.iter().zip(&c.data).filter(|(a, b)| (*a - *b).abs() * 255.0 > 40.0).count() as f64 / n * 100.0;
+        if mean > 2.0 || off > 0.5 {
+            format!("{} computes this model incorrectly (self-check: mean difference {mean:.1}/255, {off:.1} % of pixels off)", ai.short())
+        } else {
+            "ok".to_string()
+        }
+    };
+    eprintln!("  {verdict}");
+    if !fake_bad {
+        let _g = CHECK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache: std::collections::HashMap<String, String> = std::fs::read_to_string(&file).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        cache.insert(key, verdict.clone());
+        if let Some(d) = file.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = std::fs::write(&file, serde_json::to_string_pretty(&cache).unwrap_or_default());
+    }
+    if verdict == "ok" {
+        Ok(())
+    } else {
+        Err(anyhow!("{verdict}"))
+    }
+}
+
 /// Fixed tile size for backends that need static shapes (CoreML, WebGPU). TLAF_STATIC_TILE=N forces it on
 /// any backend (for testing), 0 turns it off.
 fn static_tile(ai: Ai) -> Option<usize> {
@@ -330,11 +446,30 @@ fn opt_level(_ai: Ai) -> GraphOptimizationLevel {
 
 impl Net {
     pub fn load(env: &'static ort::environment::Environment, path: &Path, t: &Target, pad: usize) -> Result<Net> {
-        let (session, used, fallback_reason) = match session(env, path, t, t.ai) {
-            Ok(s) => (s, t.ai, None),
-            Err(e) if t.ai.is_gpu() && t.cpu_fallback => (session(env, path, t, Ai::Cpu)?, Ai::Cpu, Some(e.to_string())),
-            Err(e) => return Err(anyhow!("could not load {}: {e}", path.display())),
+        // The chosen backend, on a Mac the other GPU backend, then the CPU. A backend that fails to load
+        // or computes wrong numbers (self-check) is skipped, and the reason is shown to the user.
+        let mut reasons: Vec<String> = Vec::new();
+        let mut picked = None;
+        for (ai, nchw) in backend_order(t) {
+            match session(env, path, t, ai, nchw) {
+                Err(e) => reasons.push(format!("{}: {e}", ai.short())),
+                Ok(mut s) => {
+                    if needs_self_check(ai) {
+                        if let Err(e) = self_check(env, path, t, ai, nchw, &mut s) {
+                            reasons.push(format!("{}: {e}", ai.short()));
+                            continue;
+                        }
+                    }
+                    picked = Some((s, ai));
+                    break;
+                }
+            }
+        }
+        let Some((session, used)) = picked else {
+            return Err(anyhow!("could not load {}: {}", path.display(), reasons.join("; ")));
         };
+        // Same backend in another layout is not a fallback worth a warning.
+        let fallback_reason = (used != t.ai && !reasons.is_empty()).then(|| reasons.join("; "));
         let input = session.inputs().first().ok_or_else(|| anyhow!("model has no input"))?;
         let f16 = input.dtype().tensor_type() == Some(TensorElementType::Float16);
         let dims: Vec<i64> = input.dtype().tensor_shape().map(|s| s.iter().copied().collect()).unwrap_or_default();
@@ -367,7 +502,7 @@ impl Net {
         if self.used == Ai::Cpu || !self.target.cpu_fallback {
             return false;
         }
-        match session(self.env, &self.path, &self.target, Ai::Cpu) {
+        match session(self.env, &self.path, &self.target, Ai::Cpu, false) {
             Ok(s) => {
                 self.session = s;
                 self.used = Ai::Cpu;
@@ -396,18 +531,25 @@ impl Net {
 
     /// One forward pass on exactly this tensor.
     fn run(&mut self, x: &Planar) -> Result<Planar> {
+        run_session(&mut self.session, self.f16, x)
+    }
+}
+
+/// One forward pass of a session on exactly this tensor.
+fn run_session(session: &mut Session, f16: bool, x: &Planar) -> Result<Planar> {
+    {
         let shape = vec![1i64, x.c as i64, x.h as i64, x.w as i64];
-        let outputs = if self.f16 {
+        let outputs = if f16 {
             let data: Vec<half::f16> = x.data.iter().map(|&v| half::f16::from_f32(v)).collect();
             let t = Tensor::from_array((shape, data))?;
-            self.session.run(ort::inputs![t])?
+            session.run(ort::inputs![t])?
         } else {
             // Borrow the pixels instead of copying hundreds of MB per frame.
             let t = ort::value::TensorRef::from_array_view((shape, x.data.as_slice()))?;
-            self.session.run(ort::inputs![t])?
+            session.run(ort::inputs![t])?
         };
         let out = &outputs[0];
-        let (shape, data): (Vec<i64>, Vec<f32>) = if self.f16 {
+        let (shape, data): (Vec<i64>, Vec<f32>) = if f16 {
             let (s, d) = out.try_extract_tensor::<half::f16>()?;
             (s.to_vec(), d.iter().map(|v| v.to_f32()).collect())
         } else {
@@ -419,6 +561,9 @@ impl Net {
         }
         Ok(Planar { c: shape[1] as usize, h: shape[2] as usize, w: shape[3] as usize, data })
     }
+}
+
+impl Net {
 
     fn padded(&self, n: usize) -> usize {
         match self.fixed {
