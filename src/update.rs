@@ -149,6 +149,37 @@ pub fn current_version() -> &'static str {
 }
 
 pub fn check() -> Result<Option<UpdateInfo>, String> {
+    // The API gives release notes, but allows only 60 anonymous requests an hour per IP address;
+    // when it says no, the release feed (no such limit) still tells us the newest version.
+    if std::env::var_os("TLAF_UPDATE_FEED").is_some() {
+        return check_feed(); // testing the fallback
+    }
+    check_api().or_else(|api_err| check_feed().map_err(|_| api_err))
+}
+
+/// Newest release from github.com/.../releases.atom. Asset links follow the fixed release layout.
+fn check_feed() -> Result<Option<UpdateInfo>, String> {
+    let url = format!("https://github.com/{REPO}/releases.atom");
+    let mut resp = agent(15).get(&url).header("User-Agent", "TomasekLibreAIFrames-update-check").call().map_err(|e| e.to_string())?;
+    let text = resp.body_mut().read_to_string().map_err(|e| e.to_string())?;
+    let Some(tag) = text.split("releases/tag/").nth(1).and_then(|t| t.split(['"', '<']).next()).filter(|t| !t.is_empty()) else {
+        return Ok(None);
+    };
+    let base = format!("https://github.com/{REPO}/releases/download/{tag}");
+    let assets: Vec<Value> = asset_name()
+        .into_iter()
+        .flat_map(|n| {
+            [
+                serde_json::json!({ "name": n, "browser_download_url": format!("{base}/{n}"), "size": 0 }),
+                serde_json::json!({ "name": format!("{n}.sha256"), "browser_download_url": format!("{base}/{n}.sha256"), "size": 0 }),
+            ]
+        })
+        .collect();
+    let release = serde_json::json!({ "tag_name": tag, "html_url": format!("https://github.com/{REPO}/releases/tag/{tag}"), "assets": assets });
+    parse_release(&release, current_version(), &install_mode(), asset_name())
+}
+
+fn check_api() -> Result<Option<UpdateInfo>, String> {
     // /releases (not /latest) so pre-releases count too.
     let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=5");
     let mut resp = agent(15).get(&url).header("User-Agent", "TomasekLibreAIFrames-update-check").header("Accept", "application/vnd.github+json").call().map_err(|e| e.to_string())?;
