@@ -34,6 +34,8 @@ Get a build from [Releases](../../releases):
 
 Start the app and press **One-click setup**. That's it.
 
+Linux builds need glibc 2.38 or newer (Ubuntu 24.04, Fedora 39, Debian 13 or newer).
+
 macOS: the app is not signed. If macOS refuses to open it, run `xattr -dr com.apple.quarantine TomasekLibreAIFrames.app` once.
 
 ## Build from source

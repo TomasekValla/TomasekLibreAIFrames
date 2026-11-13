@@ -24,11 +24,11 @@ jobs:
       matrix:
         include:
           - { name: windows-x64,          os: windows-latest, features: "",         kind: windows }
-          - { name: linux-x64-webgpu,     os: ubuntu-22.04,   features: "webgpu",   kind: linux }
-          - { name: linux-x64-cuda,       os: ubuntu-22.04,   features: "cuda",     kind: linux }
-          - { name: linux-x64-rocm,       os: ubuntu-22.04,   features: "migraphx", kind: linux }
-          - { name: linux-x64-cpu,        os: ubuntu-22.04,   features: "",         kind: linux }
-          - { name: macos-apple-silicon,  os: macos-14,       features: "",         kind: macos }
+          - { name: linux-x64-webgpu,     os: ubuntu-24.04,   features: "webgpu",   kind: linux }
+          - { name: linux-x64-cuda,       os: ubuntu-24.04,   features: "cuda",     kind: linux }
+          - { name: linux-x64-rocm,       os: ubuntu-24.04,   features: "migraphx", kind: linux }
+          - { name: linux-x64-cpu,        os: ubuntu-24.04,   features: "",         kind: linux }
+          - { name: macos-apple-silicon,  os: macos-latest,       features: "",         kind: macos }
     env:
       ORT_CUDA_VERSION: "13"
     steps:
@@ -103,7 +103,7 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
         with:
