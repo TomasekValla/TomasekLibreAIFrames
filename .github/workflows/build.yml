@@ -1,0 +1,116 @@
+name: Build
+
+# Every push to main builds all platforms (artifacts on the run page).
+# A tag like v0.1.0 also publishes a GitHub release:  git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64,          os: windows-latest, features: "",         kind: windows }
+          - { name: linux-x64-webgpu,     os: ubuntu-22.04,   features: "webgpu",   kind: linux }
+          - { name: linux-x64-cuda,       os: ubuntu-22.04,   features: "cuda",     kind: linux }
+          - { name: linux-x64-rocm,       os: ubuntu-22.04,   features: "migraphx", kind: linux }
+          - { name: linux-x64-cpu,        os: ubuntu-22.04,   features: "",         kind: linux }
+          - { name: macos-apple-silicon,  os: macos-14,       features: "",         kind: macos }
+    env:
+      ORT_CUDA_VERSION: "13"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: Test
+        run: cargo test --locked --features "${{ matrix.features }}"
+
+      - name: Build
+        run: cargo build --release --locked --features "${{ matrix.features }}"
+
+      - name: Package (Windows)
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: |
+          $d = "dist\TomasekLibreAIFrames-${{ matrix.name }}"
+          New-Item -ItemType Directory -Force $d | Out-Null
+          Copy-Item target\release\TomasekLibreAIFrames.exe $d
+          Get-ChildItem target\release\*.dll | Copy-Item -Destination $d
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, README.md $d
+          $zip = "dist\TomasekLibreAIFrames-${{ matrix.name }}.zip"
+          Compress-Archive -Path $d -DestinationPath $zip
+          # The in-app updater only installs archives with a matching checksum file.
+          "$((Get-FileHash $zip -Algorithm SHA256).Hash.ToLower())  $(Split-Path $zip -Leaf)" | Out-File -Encoding ascii "$zip.sha256"
+
+      - name: Package (Linux)
+        if: matrix.kind == 'linux'
+        run: |
+          d="dist/TomasekLibreAIFrames-${{ matrix.name }}"
+          mkdir -p "$d"
+          cp target/release/TomasekLibreAIFrames "$d/"
+          cp target/release/*.so* "$d/" 2>/dev/null || true
+          cp LICENSE THIRD_PARTY_NOTICES.md README.md "$d/"
+          tar -C dist -czf "dist/TomasekLibreAIFrames-${{ matrix.name }}.tar.gz" "TomasekLibreAIFrames-${{ matrix.name }}"
+          (cd dist && sha256sum "TomasekLibreAIFrames-${{ matrix.name }}.tar.gz" > "TomasekLibreAIFrames-${{ matrix.name }}.tar.gz.sha256")
+
+      - name: Package (macOS)
+        if: matrix.kind == 'macos'
+        run: |
+          app="dist/TomasekLibreAIFrames.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/TomasekLibreAIFrames "$app/Contents/MacOS/"
+          cp assets/icon-512.png "$app/Contents/Resources/icon.png"
+          cp target/release/*.dylib "$app/Contents/MacOS/" 2>/dev/null || true
+          cat > "$app/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>TomasekLibreAIFrames</string>
+            <key>CFBundleExecutable</key><string>TomasekLibreAIFrames</string>
+            <key>CFBundleIdentifier</key><string>cz.tomasekvalla.libreaiframes</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          EOF
+          cp LICENSE THIRD_PARTY_NOTICES.md README.md dist/
+          (cd dist && zip -qry "TomasekLibreAIFrames-${{ matrix.name }}.zip" TomasekLibreAIFrames.app LICENSE THIRD_PARTY_NOTICES.md README.md && shasum -a 256 "TomasekLibreAIFrames-${{ matrix.name }}.zip" > "TomasekLibreAIFrames-${{ matrix.name }}.zip.sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TomasekLibreAIFrames-${{ matrix.name }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.sha256
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

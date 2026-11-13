@@ -1,0 +1,64 @@
+[package]
+name = "tomasek-libre-ai-frames"
+version = "0.1.0"
+edition = "2021"
+description = "TomasekLibreAIFrames - AI video frame interpolation and upscaling (ONNX Runtime)"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/TomasekValla/TomasekLibreAIFrames"
+publish = false
+
+[[bin]]
+name = "TomasekLibreAIFrames"
+path = "src/main.rs"
+
+# AI backends. Windows always gets DirectML and macOS CoreML (+ WebGPU), see the target sections below.
+# On Linux pick exactly one GPU backend when building (none = CPU only):
+#   cargo build --release --features webgpu     # any GPU through Vulkan
+#   cargo build --release --features cuda       # NVIDIA, needs CUDA 13 + cuDNN installed
+#   cargo build --release --features migraphx   # AMD, needs ROCm installed
+[features]
+webgpu = ["ort/webgpu"]
+cuda = ["ort/cuda", "ort/tensorrt", "ort/nvrtx"]
+migraphx = ["ort/migraphx"]
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+egui = "0.37"
+rfd = "0.17"
+egui-phosphor = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+half = "2"
+ort = { version = "=2.0.0-rc.15", features = ["half"] }
+sysinfo = "0.38"
+ureq = { version = "3", features = ["platform-verifier"] }
+sevenz-rust2 = "0.20"
+sha2 = "0.10"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+tar = "0.4"
+liblzma = "0.4"
+flate2 = "1"
+
+[target.'cfg(windows)'.dependencies]
+ort = { version = "=2.0.0-rc.15", features = ["directml"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Performance", "Win32_UI_WindowsAndMessaging"] }
+tray-icon = "0.24"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "=2.0.0-rc.15", features = ["coreml", "webgpu"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+
+# Pixel conversion loops are hot even in debug builds.
+[profile.dev.package."*"]
+opt-level = 2
+[profile.dev]
+opt-level = 1
