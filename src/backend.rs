@@ -59,14 +59,16 @@ pub fn available() -> Vec<Ai> {
     let mut v = Vec::new();
     #[cfg(windows)]
     v.push(Ai::DirectMl);
-    #[cfg(target_os = "macos")]
-    v.push(Ai::CoreMl);
     #[cfg(feature = "cuda")]
     v.extend([Ai::TensorRt, Ai::Cuda]);
     #[cfg(feature = "migraphx")]
     v.push(Ai::MiGraphX);
+    // On a Mac WebGPU (Metal) comes first: measured on an M4, RIFE 4.26 Heavy ran 1.42 fps at 1080p with
+    // 151 MB/MP, while CoreML spent minutes compiling and fell back to the CPU (0.01 fps).
     #[cfg(any(feature = "webgpu", target_os = "macos"))]
     v.push(Ai::WebGpu);
+    #[cfg(target_os = "macos")]
+    v.push(Ai::CoreMl);
     v.push(Ai::Cpu);
     v
 }
