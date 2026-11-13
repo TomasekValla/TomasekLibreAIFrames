@@ -156,6 +156,8 @@ pub struct Settings {
     pub theme: ThemeMode,
     /// Czech UI (English is the default).
     pub czech: bool,
+    /// UI zoom (1.0 = 100 %).
+    pub ui_scale: f32,
     /// Look for a new release on GitHub at start.
     pub update_check: bool,
     /// Right-click menu entry and "Open with" entry (Windows registry / Linux file managers).
@@ -250,6 +252,7 @@ impl Default for Settings {
             preview_compare: true,
             theme: ThemeMode::System,
             czech: false,
+            ui_scale: 1.0,
             update_check: true,
             context_menu: false,
             open_with: false,

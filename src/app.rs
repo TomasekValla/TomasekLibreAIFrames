@@ -98,6 +98,7 @@ pub struct App {
     batch_started: Option<Instant>,
     pub show_setup: bool,
     pub show_models: bool,
+    pub show_settings: bool,
     pub setup_pick: Vec<String>,
     pub tasks: Tasks,
     mem: hw::MemProbe,
@@ -139,6 +140,7 @@ impl App {
             batch_started: None,
             show_setup,
             show_models: false,
+            show_settings: false,
             setup_pick: crate::setup::recommended().into_iter().map(String::from).collect(),
             tasks: Tasks::default(),
             mem: hw::MemProbe::new(),
@@ -162,6 +164,7 @@ impl App {
             app.tray = crate::tray::create(cc.egui_ctx.clone(), ttx);
             app.tray_rx = Some(trx);
         }
+        cc.egui_ctx.set_zoom_factor(app.s.ui_scale.clamp(0.5, 3.0));
         if app.s.setup_done && app.s.update_check {
             app.check_update(&cc.egui_ctx);
         }
@@ -593,19 +596,22 @@ impl eframe::App for App {
         egui::Panel::top("top").frame(egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(egui::Margin::symmetric(16, 10))).show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("run").frame(egui::Frame::new().fill(theme::footer_bg()).inner_margin(egui::Margin::symmetric(16, 12))).show(ui, |ui| self.run_bar(ui, &ctx));
         egui::Panel::left("queue")
-            .default_size(330.0)
-            .size_range(260.0..=520.0)
+            .exact_size(330.0)
+            .resizable(false)
             .frame(egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(egui::Margin::same(12)))
             .show(ui, |ui| self.queue_panel(ui, &ctx));
         egui::Panel::right("settings")
-            .default_size(420.0)
-            .size_range(360.0..=620.0)
+            .exact_size(430.0)
+            .resizable(false)
             .frame(egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(egui::Margin::same(12)))
             .show(ui, |ui| self.settings_panel(ui, &ctx));
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(egui::Margin::same(12))).show(ui, |ui| self.preview_panel(ui, &ctx));
 
         self.setup_window(&ctx);
         self.models_window(&ctx);
+        self.app_settings_window(&ctx);
+        // Remember the UI size (slider or Ctrl +/-).
+        self.s.ui_scale = ctx.zoom_factor();
 
         let now = serde_json::to_string(&self.s).unwrap_or_default();
         if now != self.saved {
@@ -636,6 +642,9 @@ impl App {
             }
             if ui.button(crate::trf!("{}  Modely", "{}  Models", theme::icon::CUBE)).on_hover_text(crate::tr!("Žebříček, stahování a benchmarky všech AI modelů", "Ranking, downloads and benchmarks of all AI models")).clicked() {
                 self.show_models = true;
+            }
+            if ui.button(format!("{}  {}", theme::icon::GEAR, crate::tr!("Nastavení", "Settings"))).clicked() {
+                self.show_settings = true;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let ai = crate::backend::resolve(self.s.perf.ai);

@@ -55,7 +55,8 @@ impl App {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_width(620.0)
+            .default_width(620.0_f32.min(ctx.content_rect().width() - 40.0))
+            .max_height(ctx.content_rect().height() - 60.0)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 if let Some(st) = self.tasks.setup.clone() {
@@ -151,7 +152,13 @@ impl App {
         let mut download: Vec<&'static str> = Vec::new();
         let mut delete: Option<String> = None;
         let mut bench: Vec<String> = Vec::new();
-        egui::Window::new(RichText::new(crate::tr!("AI modely - žebříček", "AI models - ranking")).strong().size(18.0)).open(&mut open).default_width(900.0).default_height(700.0).min_width(720.0).min_height(420.0).show(ctx, |ui| {
+        egui::Window::new(RichText::new(crate::tr!("AI modely - žebříček", "AI models - ranking")).strong().size(18.0)).open(&mut open)
+            .default_width(900.0_f32.min(ctx.content_rect().width() - 40.0))
+            .default_height(700.0_f32.min(ctx.content_rect().height() - 80.0))
+            .max_height(ctx.content_rect().height() - 60.0)
+            .min_width(480.0)
+            .min_height(320.0)
+            .show(ctx, |ui| {
             ui.label(small(crate::trf!(
                 "Kvalita = odhad podle veřejných srovnání (neměřeno). Rychlost a paměť se měří na tomhle počítači tlačítkem \"Benchmark\" ({}).", "Quality = curated score from public comparisons (not measured). Speed and memory are measured on this computer with \"Benchmark\" ({}).",
                 ai.short()

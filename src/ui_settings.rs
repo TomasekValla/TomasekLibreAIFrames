@@ -319,63 +319,6 @@ impl App {
             ui.set_width(ui.available_width());
             egui::CollapsingHeader::new(RichText::new(crate::tr!("Pokročilé", "Advanced")).strong().size(16.0)).id_salt("adv").show(ui, |ui| {
                 let s = &mut self.s;
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(crate::tr!("Vzhled", "Theme")).strong());
-                    theme::chip(ui, s.theme == ThemeMode::System, crate::tr!("Systém", "System")).clicked().then(|| s.theme = ThemeMode::System);
-                    theme::chip(ui, s.theme == ThemeMode::Dark, crate::tr!("Tmavé", "Dark")).clicked().then(|| s.theme = ThemeMode::Dark);
-                    theme::chip(ui, s.theme == ThemeMode::Light, crate::tr!("Světlé", "Light")).clicked().then(|| s.theme = ThemeMode::Light);
-                });
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(crate::tr!("Jazyk", "Language")).strong());
-                    if theme::chip(ui, !s.czech, "English").clicked() {
-                        s.czech = false;
-                        crate::i18n::set_english(true);
-                    }
-                    if theme::chip(ui, s.czech, "Čeština").clicked() {
-                        s.czech = true;
-                        crate::i18n::set_english(false);
-                    }
-                });
-                ui.separator();
-                ui.label(RichText::new(crate::tr!("Aktualizace", "Updates")).strong());
-                ui.checkbox(&mut s.update_check, crate::tr!("Při spuštění zkontrolovat novou verzi (GitHub)", "Check for a new version at start (GitHub)"));
-                let mut check_now = false;
-                ui.horizontal(|ui| {
-                    ui.label(small(format!("{} {}", crate::tr!("Verze", "Version"), crate::update::current_version())));
-                    check_now = ui.small_button(crate::tr!("Zkontrolovat teď", "Check now")).clicked();
-                    match &self.update {
-                        crate::update::UpdateState::Checking => {
-                            ui.label(small(crate::tr!("kontroluji...", "checking...")));
-                        }
-                        crate::update::UpdateState::UpToDate => {
-                            ui.label(RichText::new(crate::tr!("máš nejnovější verzi", "you have the latest version")).color(good()).small());
-                        }
-                        crate::update::UpdateState::Error(e) => {
-                            ui.label(RichText::new(e.clone()).color(bad()).small());
-                        }
-                        _ => {}
-                    }
-                });
-                ui.separator();
-                ui.label(RichText::new(crate::tr!("Systém", "System")).strong());
-                let mut shell_err = None;
-                ui.horizontal_wrapped(|ui| {
-                    let has = crate::shell::shortcut_exists();
-                    if ui.small_button(if has { crate::tr!("Odebrat ze Startu", "Remove Start menu entry") } else { crate::tr!("Přidat do Startu", "Add to Start menu") }).clicked() {
-                        let r = if has { crate::shell::remove_start_shortcut() } else { crate::shell::create_start_shortcut().map(|_| ()) };
-                        shell_err = r.err();
-                    }
-                    if ui.checkbox(&mut s.context_menu, crate::tr!("V menu pravého tlačítka", "In the right-click menu")).changed() {
-                        shell_err = crate::shell::set_context_menu(s.context_menu).err();
-                    }
-                    if ui.checkbox(&mut s.open_with, crate::tr!("V \"Otevřít v programu\"", "In \"Open with\"")).changed() {
-                        shell_err = crate::shell::set_open_with(s.open_with).err();
-                    }
-                });
-                if let Some(e) = shell_err {
-                    ui.label(RichText::new(e).color(bad()).small());
-                }
-                ui.separator();
                 ui.label(RichText::new("AI compute").strong());
                 let cur = backend::resolve(s.perf.ai);
                 let text = if s.perf.ai.is_none() { format!("Auto ({})", cur.short()) } else { cur.label().to_string() };
@@ -419,9 +362,6 @@ impl App {
                 ui.label(RichText::new(crate::tr!("Složka FFmpeg", "FFmpeg folder")).strong());
                 ui.add(egui::TextEdit::singleline(&mut s.ffmpeg_dir).hint_text(crate::tr!("prázdné = ze setupu nebo z PATH", "empty = installed by setup, or from PATH")).desired_width(ui.available_width()));
                 ui.horizontal(|ui| {
-                    if check_now {
-                        self.check_update(ctx);
-                    }
                     if ui.button(crate::tr!("Znovu ověřit enkodéry", "Re-check encoders")).clicked() {
                         self.check_encoders(ctx);
                     }
@@ -438,6 +378,101 @@ impl App {
             });
         });
         self.fix_model_choices();
+    }
+
+    /// App settings (look, language, updates, system integration) in their own window.
+    pub fn app_settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+        let mut open = true;
+        let screen = ctx.content_rect();
+        let mut check_now = false;
+        egui::Window::new(RichText::new(crate::tr!("Nastavení", "Settings")).font(theme::bold(18.0)))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(560.0_f32.min(screen.width() - 40.0))
+            .max_height(screen.height() - 80.0)
+            .default_pos(screen.center() - egui::vec2(280.0, 260.0))
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
+                    let s = &mut self.s;
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(crate::tr!("Velikost UI", "UI size")).strong());
+                        let mut z = ctx.zoom_factor();
+                        if ui.add(egui::Slider::new(&mut z, 0.75..=2.0).step_by(0.05).custom_formatter(|v, _| format!("{:.0} %", v * 100.0))).changed() {
+                            ctx.set_zoom_factor(z);
+                        }
+                        if ui.small_button("100 %").clicked() {
+                            ctx.set_zoom_factor(1.0);
+                        }
+                    });
+                    ui.label(small(crate::tr!("Taky Ctrl + / Ctrl - / Ctrl 0.", "Also Ctrl + / Ctrl - / Ctrl 0.")));
+                    ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(crate::tr!("Vzhled", "Theme")).strong());
+                            theme::chip(ui, s.theme == ThemeMode::System, crate::tr!("Systém", "System")).clicked().then(|| s.theme = ThemeMode::System);
+                            theme::chip(ui, s.theme == ThemeMode::Dark, crate::tr!("Tmavé", "Dark")).clicked().then(|| s.theme = ThemeMode::Dark);
+                            theme::chip(ui, s.theme == ThemeMode::Light, crate::tr!("Světlé", "Light")).clicked().then(|| s.theme = ThemeMode::Light);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(crate::tr!("Jazyk", "Language")).strong());
+                            if theme::chip(ui, !s.czech, "English").clicked() {
+                                s.czech = false;
+                                crate::i18n::set_english(true);
+                            }
+                            if theme::chip(ui, s.czech, "Čeština").clicked() {
+                                s.czech = true;
+                                crate::i18n::set_english(false);
+                            }
+                        });
+                        ui.separator();
+                        ui.label(RichText::new(crate::tr!("Aktualizace", "Updates")).strong());
+                        ui.checkbox(&mut s.update_check, crate::tr!("Při spuštění zkontrolovat novou verzi (GitHub)", "Check for a new version at start (GitHub)"));
+                        ui.horizontal(|ui| {
+                            ui.label(small(format!("{} {}", crate::tr!("Verze", "Version"), crate::update::current_version())));
+                            check_now = ui.small_button(crate::tr!("Zkontrolovat teď", "Check now")).clicked();
+                            match &self.update {
+                                crate::update::UpdateState::Checking => {
+                                    ui.label(small(crate::tr!("kontroluji...", "checking...")));
+                                }
+                                crate::update::UpdateState::UpToDate => {
+                                    ui.label(RichText::new(crate::tr!("máš nejnovější verzi", "you have the latest version")).color(good()).small());
+                                }
+                                crate::update::UpdateState::Error(e) => {
+                                    ui.label(RichText::new(e.clone()).color(bad()).small());
+                                }
+                                _ => {}
+                            }
+                        });
+                        ui.separator();
+                        ui.label(RichText::new(crate::tr!("Systém", "System")).strong());
+                        let mut shell_err = None;
+                        ui.horizontal_wrapped(|ui| {
+                            let has = crate::shell::shortcut_exists();
+                            if ui.small_button(if has { crate::tr!("Odebrat ze Startu", "Remove Start menu entry") } else { crate::tr!("Přidat do Startu", "Add to Start menu") }).clicked() {
+                                let r = if has { crate::shell::remove_start_shortcut() } else { crate::shell::create_start_shortcut().map(|_| ()) };
+                                shell_err = r.err();
+                            }
+                            if ui.checkbox(&mut s.context_menu, crate::tr!("V menu pravého tlačítka", "In the right-click menu")).changed() {
+                                shell_err = crate::shell::set_context_menu(s.context_menu).err();
+                            }
+                            if ui.checkbox(&mut s.open_with, crate::tr!("V \"Otevřít v programu\"", "In \"Open with\"")).changed() {
+                                shell_err = crate::shell::set_open_with(s.open_with).err();
+                            }
+                        });
+                        if let Some(e) = shell_err {
+                            ui.label(RichText::new(e).color(bad()).small());
+                        }
+                });
+            });
+        if check_now {
+            self.check_update(ctx);
+        }
+        if !open {
+            self.show_settings = false;
+        }
     }
 }
 
