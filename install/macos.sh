@@ -9,16 +9,12 @@ name="$APP-macos-apple-silicon.zip"
 
 [ "$(uname -m)" = "arm64" ] || { echo "Only Apple Silicon Macs are supported." >&2; exit 1; }
 
-api=$(curl -fsSL -H "User-Agent: $APP-installer" "https://api.github.com/repos/$REPO/releases?per_page=20")
-tags=$(printf '%s' "$api" | tr ',' '\n' | grep -E '"(tag_name|prerelease|draft)"' | sed 's/[" ]//g')
-pick() {
-    printf '%s\n' "$tags" | awk -F: -v want="$1" '
-        /^tag_name:/ { t = $2 } /^draft:/ { d = $2 }
-        /^prerelease:/ { if (d != "true" && (want == "any" || $2 == "false")) { print t; exit } }'
-}
+# The release feed, not the GitHub API: the API allows only 60 anonymous requests an hour.
+# Newest first; a tag with "-" (v1.2.0-pre.3) is a pre-release.
+tags=$(curl -fsSL "https://github.com/$REPO/releases.atom" | grep -o 'releases/tag/[^"<]*' | sed 's|releases/tag/||' | awk '!seen[$0]++')
 tag=""
-[ "${TLAF_PRERELEASE:-0}" = "1" ] || tag=$(pick stable)
-[ -n "$tag" ] || tag=$(pick any)
+[ "${TLAF_PRERELEASE:-0}" = "1" ] || tag=$(printf '%s\n' "$tags" | grep -v -- '-' | head -n 1)
+[ -n "$tag" ] || tag=$(printf '%s\n' "$tags" | head -n 1)
 [ -n "$tag" ] || { echo "No release found." >&2; exit 1; }
 
 base="https://github.com/$REPO/releases/download/$tag"
