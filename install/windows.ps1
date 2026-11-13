@@ -14,7 +14,17 @@ if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") { throw "Only 64-bit x86 Windows is
 $feed = (Invoke-WebRequest "https://github.com/$repo/releases.atom" -UseBasicParsing).Content
 $tags = @([regex]::Matches($feed, "releases/tag/([^`"<]+)") | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
 $stable = @($tags | Where-Object { $_ -notmatch "-" })
-$tag = if ($env:TLAF_PRERELEASE -eq "1" -or $stable.Count -eq 0) { $tags[0] } else { $stable[0] }
+# Stable releases first (all tags with TLAF_PRERELEASE=1). A tag whose release is still being built has no
+# files yet, so take the first one whose checksum file is really there.
+$cands = if ($env:TLAF_PRERELEASE -eq "1") { $tags } else { @($stable) + @($tags | Where-Object { $_ -match "-" }) }
+$tag = $null
+foreach ($t in $cands) {
+    try {
+        $null = Invoke-WebRequest "https://github.com/$repo/releases/download/$t/$name.sha256" -UseBasicParsing
+        $tag = $t
+        break
+    } catch {}
+}
 if (-not $tag) { throw "No release found." }
 $base = "https://github.com/$repo/releases/download/$tag"
 

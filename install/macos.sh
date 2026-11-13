@@ -12,9 +12,20 @@ name="$APP-macos-apple-silicon.zip"
 # The release feed, not the GitHub API: the API allows only 60 anonymous requests an hour.
 # Newest first; a tag with "-" (v1.2.0-pre.3) is a pre-release.
 tags=$(curl -fsSL "https://github.com/$REPO/releases.atom" | grep -o 'releases/tag/[^"<]*' | sed 's|releases/tag/||' | awk '!seen[$0]++')
+# Stable releases first (all tags with TLAF_PRERELEASE=1). A tag whose release is still being built
+# has no files yet, so take the first one whose checksum file is really there.
+if [ "${TLAF_PRERELEASE:-0}" = "1" ]; then
+    cands="$tags"
+else
+    cands=$( (printf '%s\n' "$tags" | grep -v -- '-'; printf '%s\n' "$tags" | grep -- '-') || true)
+fi
 tag=""
-[ "${TLAF_PRERELEASE:-0}" = "1" ] || tag=$(printf '%s\n' "$tags" | grep -v -- '-' | head -n 1)
-[ -n "$tag" ] || tag=$(printf '%s\n' "$tags" | head -n 1)
+for t in $cands; do
+    if curl -fsL -r 0-0 -o /dev/null "https://github.com/$REPO/releases/download/$t/$name.sha256"; then
+        tag="$t"
+        break
+    fi
+done
 [ -n "$tag" ] || { echo "No release found." >&2; exit 1; }
 
 base="https://github.com/$REPO/releases/download/$tag"
