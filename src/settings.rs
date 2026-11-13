@@ -306,10 +306,19 @@ fn settings_path() -> PathBuf {
 
 impl Settings {
     pub fn load() -> Self {
-        std::fs::read_to_string(settings_path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let path = settings_path();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        // Editors on Windows like to add a BOM; serde_json does not accept it.
+        match serde_json::from_str(text.trim_start_matches('\u{feff}')) {
+            Ok(s) => s,
+            Err(_) => {
+                // Keep the unreadable file instead of silently overwriting it with defaults.
+                let _ = std::fs::copy(&path, path.with_extension("json.broken"));
+                Self::default()
+            }
+        }
     }
 
     pub fn save(&self) {

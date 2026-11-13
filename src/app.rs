@@ -99,6 +99,10 @@ pub struct App {
     pub show_setup: bool,
     pub show_models: bool,
     pub show_settings: bool,
+    /// Zoom applied last frame; a different value means Ctrl +/- changed it.
+    applied_zoom: f32,
+    /// Quit was asked while a job ran: the job is being stopped and cleaned up, then the app closes.
+    quitting: Option<Instant>,
     pub setup_pick: Vec<String>,
     pub tasks: Tasks,
     mem: hw::MemProbe,
@@ -141,6 +145,8 @@ impl App {
             show_setup,
             show_models: false,
             show_settings: false,
+            applied_zoom: 0.0,
+            quitting: None,
             setup_pick: crate::setup::recommended().into_iter().map(String::from).collect(),
             tasks: Tasks::default(),
             mem: hw::MemProbe::new(),
@@ -164,7 +170,6 @@ impl App {
             app.tray = crate::tray::create(cc.egui_ctx.clone(), ttx);
             app.tray_rx = Some(trx);
         }
-        cc.egui_ctx.set_zoom_factor(app.s.ui_scale.clamp(0.5, 3.0));
         if app.s.setup_done && app.s.update_check {
             app.check_update(&cc.egui_ctx);
         }
@@ -414,6 +419,8 @@ impl App {
                 self.stop_after = false;
             }
             if self.running.is_none() {
+                // Models stay cached between videos of one queue; afterwards give the VRAM back.
+                crate::pipeline::unload_models();
                 let done = self.queue.iter().filter(|i| matches!(i.status, Status::Done(_))).count();
                 let failed = self.queue.iter().filter(|i| matches!(i.status, Status::Failed(_))).count();
                 if failed > 0 {
@@ -423,6 +430,15 @@ impl App {
                 }
             }
         }
+    }
+
+    fn quit_after_stop(&mut self) {
+        if let Some(r) = &self.running {
+            r.prog.cancel.store(true, Ordering::Relaxed);
+            self.batch = false;
+            self.notify(crate::tr!("Zastavuji a uklízím...", "Stopping and cleaning up..."), warn());
+        }
+        self.quitting.get_or_insert_with(Instant::now);
     }
 
     pub fn show_window(&mut self, ctx: &egui::Context) {
@@ -438,19 +454,28 @@ impl App {
         for m in msgs {
             match m {
                 crate::tray::TrayMsg::Show => self.show_window(ctx),
-                crate::tray::TrayMsg::Quit => {
-                    if let Some(r) = &self.running {
-                        r.prog.cancel.store(true, Ordering::Relaxed);
-                    }
-                    self.tray = None;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
+                crate::tray::TrayMsg::Quit => self.quit_after_stop(),
             }
         }
-        if ctx.input(|i| i.viewport().close_requested()) && self.running.is_some() && self.tray.is_some() {
+        if ctx.input(|i| i.viewport().close_requested()) && self.running.is_some() && self.quitting.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            self.hidden = true;
+            if self.tray.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.hidden = true;
+            } else {
+                // No tray to keep working in: stop the job, let it delete its unfinished file, then close.
+                self.quit_after_stop();
+            }
+        }
+        if let Some(t) = self.quitting {
+            // Give the job up to 10 s to stop; whatever it leaves is removed on the next start.
+            if self.running.is_none() || t.elapsed() > Duration::from_secs(10) {
+                self.tray = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
         }
         // Finished while hidden: install a waiting update.
         if self.running.is_none() {
@@ -587,6 +612,7 @@ impl eframe::App for App {
         self.poll(&ctx);
         self.handle_close(&ctx);
         self.ensure_scale(&ctx);
+        self.fit_zoom(&ctx);
 
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
         for p in dropped {
@@ -595,13 +621,17 @@ impl eframe::App for App {
 
         egui::Panel::top("top").frame(egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(egui::Margin::symmetric(16, 10))).show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("run").frame(egui::Frame::new().fill(theme::footer_bg()).inner_margin(egui::Margin::symmetric(16, 12))).show(ui, |ui| self.run_bar(ui, &ctx));
+        // Side panels follow the window width (never dragged, so they cannot creep).
+        let w = ctx.content_rect().width();
+        let left_w = (w * 0.24).clamp(240.0, 330.0);
+        let right_w = (w * 0.31).clamp(330.0, 430.0);
         egui::Panel::left("queue")
-            .exact_size(330.0)
+            .exact_size(left_w)
             .resizable(false)
             .frame(egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(egui::Margin::same(12)))
             .show(ui, |ui| self.queue_panel(ui, &ctx));
         egui::Panel::right("settings")
-            .exact_size(430.0)
+            .exact_size(right_w)
             .resizable(false)
             .frame(egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(egui::Margin::same(12)))
             .show(ui, |ui| self.settings_panel(ui, &ctx));
@@ -610,8 +640,6 @@ impl eframe::App for App {
         self.setup_window(&ctx);
         self.models_window(&ctx);
         self.app_settings_window(&ctx);
-        // Remember the UI size (slider or Ctrl +/-).
-        self.s.ui_scale = ctx.zoom_factor();
 
         let now = serde_json::to_string(&self.s).unwrap_or_default();
         if now != self.saved {
@@ -629,6 +657,31 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// Applies the UI size from settings, capped so the layout still fits the window.
+    fn fit_zoom(&mut self, ctx: &egui::Context) {
+        let z = ctx.zoom_factor();
+        if self.applied_zoom > 0.0 && (z - self.applied_zoom).abs() > 1e-3 {
+            // Changed by egui's own Ctrl +/- / Ctrl 0 keys.
+            self.s.ui_scale = z.clamp(0.5, 3.0);
+        }
+        let r = ctx.content_rect();
+        if r.width() < 300.0 || r.height() < 200.0 || ctx.input(|i| i.viewport().minimized == Some(true)) {
+            // Minimized or not laid out yet: the size says nothing about the window.
+            return;
+        }
+        let eff = self.s.ui_scale.min(self.max_zoom(ctx)).clamp(0.5, 3.0);
+        if (eff - z).abs() > 1e-3 {
+            ctx.set_zoom_factor(eff);
+        }
+        self.applied_zoom = eff;
+    }
+
+    /// Largest UI size that fits the current window.
+    pub fn max_zoom(&self, ctx: &egui::Context) -> f32 {
+        let base = ctx.content_rect().size() * ctx.zoom_factor(); // window size in points at 100 %
+        (base.x / MIN_LAYOUT.x).min(base.y / MIN_LAYOUT.y)
+    }
+
     fn top_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             // One label with two colours, so there is no item spacing between the two halves.
@@ -649,22 +702,55 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let ai = crate::backend::resolve(self.s.perf.ai);
                 let dev = self.sys.resolve_device(self.s.perf.device);
-                let gpu = match self.sys.gpu(dev) {
-                    Some(g) if g.vram > 0 && !self.sys.unified_memory => format!("{} · {}", g.name, hw::fmt_bytes(g.vram)),
-                    Some(g) => g.name.clone(),
-                    None => crate::tr!("žádná GPU", "no GPU found").into(),
+                let (gpu_name, gpu) = match self.sys.gpu(dev) {
+                    Some(g) if g.vram > 0 && !self.sys.unified_memory => (g.name.clone(), format!("{} · {}", g.name, hw::fmt_bytes(g.vram))),
+                    Some(g) => (g.name.clone(), g.name.clone()),
+                    None => (String::new(), crate::tr!("žádná GPU", "no GPU found").into()),
                 };
-                badge(ui, &format!("AI: {} · {gpu}", ai.short()), if ai.is_gpu() { accent_fg() } else { warn() });
                 let simd = if self.sys.avx512 { " · AVX-512" } else if self.sys.avx2 { " · AVX2" } else { "" };
-                badge(ui, &crate::trf!("{} · {} vláken{simd} · RAM {}", "{} · {} threads{simd} · RAM {}", self.sys.cpu_name, self.sys.threads, hw::fmt_bytes(self.sys.ram)), cyan());
-                match &self.caps {
-                    None => badge(ui, crate::tr!("ověřuji enkodéry...", "checking encoders..."), muted_c()),
-                    Some(c) if c.ok.is_empty() => badge(ui, crate::tr!("Chybí FFmpeg - spusť setup", "FFmpeg missing - run setup"), bad()),
-                    Some(c) => badge(ui, &crate::trf!("{} enkodérů", "{} encoders", c.ok.len()), good()),
+                let cpu_full = crate::trf!("{} · {} vláken{simd} · RAM {}", "{} · {} threads{simd} · RAM {}", self.sys.cpu_name, self.sys.threads, hw::fmt_bytes(self.sys.ram));
+                let cpu_short = crate::trf!("{} vláken · RAM {}", "{} threads · RAM {}", self.sys.threads, hw::fmt_bytes(self.sys.ram));
+                let ai_full = format!("AI: {} · {gpu}", ai.short());
+                let ai_mid = format!("AI: {} · {gpu_name}", ai.short());
+                let ai_short = format!("AI: {}", ai.short());
+                let ai_c = if ai.is_gpu() { accent_fg() } else { warn() };
+                let (enc_txt, enc_c) = match &self.caps {
+                    None => (crate::tr!("ověřuji enkodéry...", "checking encoders...").to_string(), muted_c()),
+                    Some(c) if c.ok.is_empty() => (crate::tr!("Chybí FFmpeg - spusť setup", "FFmpeg missing - run setup").to_string(), bad()),
+                    Some(c) => (crate::trf!("{} enkodérů", "{} encoders", c.ok.len()), good()),
+                };
+
+                // Fit the badges into the room right of the buttons: AI first, then encoders, then CPU.
+                // Each falls back to a shorter text or is left out; the tooltip always has everything.
+                let gap = ui.spacing().item_spacing.x;
+                let mut room = ui.available_width() - 8.0 - self.update_widget_width(ui);
+                let mut pick = |ui: &Ui, options: &[&str]| -> Option<String> {
+                    for o in options {
+                        let w = theme::pill_width(ui, o) + gap;
+                        if w <= room {
+                            room -= w;
+                            return Some(o.to_string());
+                        }
+                    }
+                    None
+                };
+                let ai_pick = pick(ui, &[&ai_full, &ai_mid, &ai_short]);
+                let enc_pick = pick(ui, &[&enc_txt]);
+                let cpu_pick = pick(ui, &[&cpu_full, &cpu_short]);
+                let tip = format!("{ai_full}\n{cpu_full}\n{enc_txt}");
+                if let Some(t) = ai_pick {
+                    badge(ui, &t, ai_c).on_hover_text(&tip);
+                }
+                if let Some(t) = cpu_pick {
+                    badge(ui, &t, cyan()).on_hover_text(&tip);
+                }
+                if let Some(t) = enc_pick {
+                    badge(ui, &t, enc_c).on_hover_text(&tip);
                 }
                 if let Some((m, c, t)) = &self.message {
-                    if t.elapsed() < Duration::from_secs(6) {
-                        ui.label(RichText::new(m).color(*c));
+                    if t.elapsed() < Duration::from_secs(6) && room > 60.0 {
+                        ui.set_max_width(room);
+                        ui.add(egui::Label::new(RichText::new(m).color(*c)).truncate()).on_hover_text(m);
                     }
                 }
                 let ctx = ui.ctx().clone();
@@ -679,7 +765,8 @@ impl App {
                         ui.label(RichText::new(format!("{} {p:.0} %", crate::tr!("Stahuji aktualizaci", "Downloading update"))).color(accent_fg()));
                     }
                     crate::update::UpdateState::Ready(info, _) => {
-                        ui.label(RichText::new(format!("{} {} - {}", crate::tr!("Verze", "Version"), info.version, crate::tr!("nainstaluje se po dokončení fronty", "installs when the queue is done"))).color(accent_fg()));
+                        ui.label(RichText::new(format!("{} {}", crate::tr!("Verze", "Version"), info.version)).color(accent_fg()))
+                            .on_hover_text(crate::tr!("Nainstaluje se po dokončení fronty", "Installs when the queue is done"));
                     }
                     _ => {}
                 }
@@ -687,12 +774,23 @@ impl App {
         });
     }
 
+    /// Room the update button / label in the top bar needs.
+    fn update_widget_width(&self, ui: &Ui) -> f32 {
+        let t = match &self.update {
+            crate::update::UpdateState::Available(info) => format!("XX  Aktualizovat na {}", info.version),
+            crate::update::UpdateState::Downloading(_) => "Stahuji aktualizaci 100 %".into(),
+            crate::update::UpdateState::Ready(info, _) => format!("Version {}", info.version),
+            _ => return 0.0,
+        };
+        ui.painter().layout_no_wrap(t, egui::FontId::proportional(15.0), Color32::WHITE).size().x + 40.0
+    }
+
     fn queue_panel(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.label(RichText::new(crate::tr!("Fronta", "Queue")).size(17.0).strong());
             ui.label(small(crate::trf!("{} videí", "{} videos", self.queue.len())));
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button(crate::trf!("{}  Soubory", "{}  Files", theme::icon::FILE_PLUS)).clicked() {
                 if let Some(files) = rfd::FileDialog::new().add_filter("Video", VIDEO_EXT).pick_files() {
                     for f in files {
@@ -1098,6 +1196,10 @@ impl App {
     }
 }
 
-pub fn badge(ui: &mut Ui, text: &str, color: Color32) {
-    theme::pill_tag(ui, text, color);
+pub fn badge(ui: &mut Ui, text: &str, color: Color32) -> egui::Response {
+    theme::pill_tag(ui, text, color)
 }
+
+/// The smallest layout the window is designed for, in points at 100 %.
+/// The UI size is capped so the window always has at least this much room.
+const MIN_LAYOUT: egui::Vec2 = egui::vec2(1040.0, 620.0);

@@ -293,6 +293,31 @@ fn gpu_busy(device: i32) -> Option<f32> {
     }
 }
 
+/// VRAM this process may still use right now: the OS budget (which shrinks when other programs
+/// use the GPU) minus what this process already holds. Windows only; None elsewhere.
+pub fn vram_free_for_app(device: i32) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use windows::core::Interface;
+        use windows::Win32::Graphics::Dxgi::*;
+        unsafe {
+            (|| {
+                let factory = CreateDXGIFactory1::<IDXGIFactory1>().ok()?;
+                let a = factory.EnumAdapters1(device.max(0) as u32).ok()?;
+                let a3: IDXGIAdapter3 = a.cast().ok()?;
+                let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+                a3.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info).ok()?;
+                Some(info.Budget.saturating_sub(info.CurrentUsage))
+            })()
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = device;
+        None
+    }
+}
+
 /// VRAM in use: per process where the OS tells us (Windows), else the whole GPU.
 fn vram_used(device: i32) -> (Option<u64>, bool) {
     #[cfg(windows)]

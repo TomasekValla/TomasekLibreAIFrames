@@ -12,8 +12,10 @@ impl App {
     pub fn settings_panel(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         let locked = self.running.is_some();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            // Sliders sit in rows with a value box and a label: size them to the panel width.
+            ui.spacing_mut().slider_width = (ui.available_width() - 200.0).clamp(90.0, 190.0);
             ui.add_enabled_ui(!locked, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(crate::tr!("Předvolby", "Presets")).strong());
                     if theme::chip(ui, false, "Anime").clicked() {
                         self.apply_preset(Content::Anime, false);
@@ -93,7 +95,7 @@ impl App {
             ui.add_space(4.0);
             Self::model_picker(ui, "interp_model", &mut s.model, &list, &bench, ai);
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.radio_value(&mut s.mode, FpsMode::Multiplier, crate::tr!("Násobit fps", "Multiply fps"));
                 ui.radio_value(&mut s.mode, FpsMode::TargetFps, crate::tr!("Cílové fps", "Target fps"));
             });
@@ -155,7 +157,7 @@ impl App {
                 _ => {}
             }
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.radio_value(&mut s.target, UpscaleTarget::ModelNative, crate::tr!("Model ×", "Model ×"));
                 ui.radio_value(&mut s.target, UpscaleTarget::Factor, crate::tr!("Násobek", "Factor"));
                 ui.radio_value(&mut s.target, UpscaleTarget::Resolution, crate::tr!("Rozlišení", "Resolution"));
@@ -214,7 +216,7 @@ impl App {
             theme::section(ui, crate::tr!("Výstup", "Output"), crate::tr!("Kodek, kvalita a kam se ukládá", "Codec, quality and where files go"), None);
             ui.add_space(4.0);
             let e = &mut self.s.encode;
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 egui::ComboBox::from_id_salt("codec").selected_text(ffmpeg::codec_label(&e.codec)).show_ui(ui, |ui| {
                     for (id, label) in ffmpeg::CODECS {
                         ui.selectable_value(&mut e.codec, id.to_string(), *label);
@@ -258,14 +260,20 @@ impl App {
                 if let Some(n) = native {
                     ui.label(small(n));
                 }
+                if e.quality > 90.0 {
+                    ui.label(RichText::new(crate::tr!(
+                        "Nad 90: obří soubory, přehrávače můžou u vysokých fps sekat.",
+                        "Above 90: huge files, players may stutter at high fps."
+                    )).small().color(theme::warn()));
+                }
             }
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(crate::tr!("Rychlost", "Speed"));
                 ui.radio_value(&mut e.speed, Speed::Fast, "fast");
                 ui.radio_value(&mut e.speed, Speed::Balanced, "balanced");
                 ui.radio_value(&mut e.speed, Speed::Quality, "best");
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.checkbox(&mut e.ten_bit, "10-bit").on_hover_text(crate::tr!("Plynulejší přechody, méně pruhů. Ne každý GPU enkodér to umí - appka pak přepne jinam.", "Smoother gradients, less banding. Not every GPU encoder supports it - the app then falls back."));
                 egui::ComboBox::from_id_salt("container").selected_text(format!(".{}", e.container)).width(70.0).show_ui(ui, |ui| {
                     for c in ffmpeg::containers(&e.codec) {
@@ -361,7 +369,7 @@ impl App {
                 ui.label(small(crate::tr!("Každý .onnx v téhle složce se objeví v Modelech (\"rife\" v názvu = interpolace, jinak upscaler).", "Any .onnx dropped into this folder shows up in Models (\"rife\" in the name = interpolation, otherwise upscaler).")));
                 ui.label(RichText::new(crate::tr!("Složka FFmpeg", "FFmpeg folder")).strong());
                 ui.add(egui::TextEdit::singleline(&mut s.ffmpeg_dir).hint_text(crate::tr!("prázdné = ze setupu nebo z PATH", "empty = installed by setup, or from PATH")).desired_width(ui.available_width()));
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.button(crate::tr!("Znovu ověřit enkodéry", "Re-check encoders")).clicked() {
                         self.check_encoders(ctx);
                     }
@@ -397,17 +405,22 @@ impl App {
             .default_pos(screen.center() - egui::vec2(280.0, 260.0))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
+                    let max_zoom = self.max_zoom(ctx);
                     let s = &mut self.s;
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(crate::tr!("Velikost UI", "UI size")).strong());
-                        let mut z = ctx.zoom_factor();
-                        if ui.add(egui::Slider::new(&mut z, 0.75..=2.0).step_by(0.05).custom_formatter(|v, _| format!("{:.0} %", v * 100.0))).changed() {
-                            ctx.set_zoom_factor(z);
-                        }
+                        ui.add(egui::Slider::new(&mut s.ui_scale, 0.75..=2.0).step_by(0.05).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)));
                         if ui.small_button("100 %").clicked() {
-                            ctx.set_zoom_factor(1.0);
+                            s.ui_scale = 1.0;
                         }
                     });
+                    if s.ui_scale > max_zoom + 0.01 {
+                        ui.label(RichText::new(crate::trf!(
+                            "Okno je na to malé - teď {:.0} %. Pro víc zvětši okno.",
+                            "The window is too small for that - showing {:.0} % now. Make the window bigger for more.",
+                            max_zoom.max(0.5) * 100.0
+                        )).small().color(theme::warn()));
+                    }
                     ui.label(small(crate::tr!("Taky Ctrl + / Ctrl - / Ctrl 0.", "Also Ctrl + / Ctrl - / Ctrl 0.")));
                     ui.separator();
                         ui.horizontal(|ui| {

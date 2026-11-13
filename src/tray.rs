@@ -47,8 +47,16 @@ pub fn create(ctx: egui::Context, tx: Sender<TrayMsg>) -> Option<Tray> {
         menu::{Menu, MenuEvent, MenuItem},
         Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
     };
-    let (rgba, w, h) = crate::appicon::rgba();
-    let icon = Icon::from_rgba(rgba, w, h).ok()?;
+    // The exe's own icon resource has hand-drawn 16-32 px sizes; Windows picks the one for the
+    // tray size (DPI-dependent). Scaling the 256 px PNG down instead looks smeared.
+    let small = unsafe { windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CXSMICON) }.max(16) as u32;
+    let icon = match Icon::from_resource(1, Some((small, small))) {
+        Ok(i) => i,
+        Err(_) => {
+            let (rgba, w, h) = crate::appicon::rgba();
+            Icon::from_rgba(rgba, w, h).ok()?
+        }
+    };
     let menu = Menu::new();
     let open = MenuItem::new(crate::tr!("Otevřít TomasekLibreAIFrames", "Open TomasekLibreAIFrames"), true, None);
     let quit = MenuItem::new(crate::tr!("Ukončit", "Quit"), true, None);

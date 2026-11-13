@@ -198,6 +198,14 @@ pub fn target(s: &Settings, sys: &System) -> Target {
     Target { ai: backend::resolve(s.perf.ai), device: sys.resolve_device(s.perf.device), cpu_fallback: s.perf.cpu_fallback, cache_dir: crate::settings::cache_dir() }
 }
 
+/// Drop cached models that are not in `keep` (VRAM held by the preview or by an earlier job with
+/// other settings), and return how many complete model sets for `keep` stay cached.
+fn keep_only_models(keep: &[Key]) -> usize {
+    let mut c = CACHE.get_or_init(Default::default).lock().unwrap();
+    c.retain(|k, _| keep.contains(k));
+    keep.iter().map(|k| c.get(k).map_or(0, |v| v.len())).min().unwrap_or(0)
+}
+
 /// Free all cached models (VRAM).
 pub fn unload_models() {
     if let Some(c) = CACHE.get() {
@@ -347,9 +355,17 @@ enum Job {
 /// How many models run at the same time. One stream leaves the GPU idle while the CPU prepares the next frame;
 /// two keep it busy. Auto drops to one when two would not fit into GPU memory (measured: more never helps).
 fn streams_for(s: &Settings, sys: &System, per_stream_vram: u64) -> usize {
+    streams_for_free(s, sys, per_stream_vram, None)
+}
+
+/// `free`: VRAM the OS lets this job still take (budget minus what the app holds, plus the cached models the
+/// job will reuse). Other programs on the GPU (games, browsers, the desktop) shrink it.
+fn streams_for_free(s: &Settings, sys: &System, per_stream_vram: u64, free: Option<u64>) -> usize {
     if s.perf.streams > 0 {
         return s.perf.streams as usize;
     }
+    // The estimate came out ~7 % low against measurements (DirectML allocator overhead).
+    let per_stream_vram = per_stream_vram / 100 * 110;
     if backend::resolve(s.perf.ai) == Ai::Cpu {
         return 1;
     }
@@ -364,9 +380,10 @@ fn streams_for(s: &Settings, sys: &System, per_stream_vram: u64) -> usize {
     if vram == 0 {
         return 2;
     }
-    if per_stream_vram * 3 <= vram / 100 * 80 {
+    let fits_free = |n: u64| free.is_none_or(|f| per_stream_vram * n <= f / 100 * 90);
+    if per_stream_vram * 3 <= vram / 100 * 80 && fits_free(3) {
         3
-    } else if per_stream_vram * 2 <= vram / 100 * 60 {
+    } else if per_stream_vram * 2 <= vram / 100 * 60 && fits_free(2) {
         2
     } else {
         1
@@ -383,7 +400,20 @@ fn streams_for_job(s: &Settings, sys: &System, plan: &Plan) -> usize {
     let it = all.iter().find(|m| m.id == s.interp.model);
     let one = estimate(&Settings { perf: crate::settings::Perf { streams: 1, ..s.perf.clone() }, ..s.clone() }, sys, plan, up, it);
     let per = if backend::resolve(s.perf.ai) == Ai::Cpu || sys.unified_memory { one.ram } else { one.vram };
-    streams_for(s, sys, per)
+
+    // Free the models this job will not use, then see how much the OS still lets us take.
+    let t = target(s, sys);
+    let dir = Path::new(&s.models_dir);
+    let mut keep = Vec::new();
+    if s.upscale.enabled {
+        keep.push((dir.join(&s.upscale.model), t.ai, t.device, 8));
+    }
+    if s.interp.enabled {
+        keep.push((dir.join(&s.interp.model), t.ai, t.device, s.perf.pad_multiple.max(1) as usize));
+    }
+    let cached = keep_only_models(&keep) as u64;
+    let free = if t.ai == Ai::Cpu || sys.unified_memory { None } else { crate::hw::vram_free_for_app(t.device).map(|f| f + cached * per) };
+    streams_for_free(s, sys, per, free)
 }
 
 /// Run `f` on several workers in parallel while keeping the input order. Workers are handed back at the end.
@@ -467,6 +497,7 @@ fn spawn_decoder(
         .stdin(Stdio::null())
         .spawn()
         .context("could not start ffmpeg (decoder)")?;
+    crate::cleanup::tie_to_app(&child);
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
     let (w, h) = (probe.width as usize, probe.height as usize);
@@ -596,6 +627,8 @@ pub fn run_job(s: &Settings, sys: &System, caps: &Caps, input: &Path, prog: Arc<
         std::fs::create_dir_all(d).with_context(|| format!("cannot create {}", d.display()))?;
     }
     let part = out.with_extension(format!("{}.part", s.encode.container));
+    // Deletes the unfinished file on every way out of this function except a finished rename.
+    let _part_guard = crate::cleanup::PartGuard::new(&part);
     let fmt = pipe_fmt(s, &probe);
     let (nw, nh) = plan.net_size;
 
@@ -627,6 +660,7 @@ pub fn run_job(s: &Settings, sys: &System, caps: &Caps, input: &Path, prog: Arc<
     .stderr(Stdio::piped())
     .spawn()
     .context("could not start ffmpeg (encoder)")?;
+    crate::cleanup::tie_to_app(&enc);
     let mut enc_in = enc.stdin.take().unwrap();
     let mut enc_err = enc.stderr.take().unwrap();
     let enc_log = std::thread::spawn(move || {

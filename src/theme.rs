@@ -390,7 +390,7 @@ pub fn section(ui: &mut Ui, title: &str, subtitle: &str, enabled: Option<&mut bo
 }
 
 /// Small rounded tag; the text colour adapts so it stays readable on light and dark cards.
-pub fn pill_tag(ui: &mut Ui, text: &str, color: Color32) {
+pub fn pill_tag(ui: &mut Ui, text: &str, color: Color32) -> egui::Response {
     let base = card_c();
     let a = 0.18_f32;
     let bg = Color32::from_rgb(
@@ -400,9 +400,15 @@ pub fn pill_tag(ui: &mut Ui, text: &str, color: Color32) {
     );
     let fg = ensure_contrast(color, bg, 4.5);
     let galley = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(12.5), fg);
-    let (rect, _) = ui.allocate_exact_size(galley.size() + vec2(16.0, 8.0), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(galley.size() + vec2(16.0, 8.0), Sense::hover());
     ui.painter().rect_filled(rect, CornerRadius::same(10), bg);
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, fg);
+    resp
+}
+
+/// Width a pill_tag with this text takes, without drawing it.
+pub fn pill_width(ui: &Ui, text: &str) -> f32 {
+    ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(12.5), Color32::WHITE).size().x + 16.0
 }
 
 pub fn progress_bar(ui: &mut Ui, frac: f32, height: f32) {

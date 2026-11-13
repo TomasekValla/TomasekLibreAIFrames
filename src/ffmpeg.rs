@@ -429,9 +429,9 @@ pub fn native_quality(enc: &str, q: f32) -> (String, &'static str) {
     let t = (q / 100.0).clamp(0.0, 1.0);
     let lerp = |worst: f32, best: f32| (worst + (best - worst) * t).round() as i64;
     match enc {
-        "libx264" | "libx265" => (lerp(36.0, 10.0).to_string(), "CRF"),
+        "libx264" | "libx265" => (lerp(34.0, 14.0).to_string(), "CRF"),
         "libsvtav1" => (lerp(50.0, 12.0).to_string(), "CRF"),
-        "av1_amf" | "av1_nvenc" | "av1_vaapi" | "av1_qsv" => (lerp(200.0, 30.0).to_string(), "QP"),
+        "av1_amf" | "av1_nvenc" | "av1_vaapi" | "av1_qsv" => (lerp(200.0, 60.0).to_string(), "QP"),
         "h264_videotoolbox" | "hevc_videotoolbox" => (lerp(40.0, 98.0).to_string(), "Q"),
         "prores_ks" | "prores_videotoolbox" => (
             match q {
@@ -444,7 +444,9 @@ pub fn native_quality(enc: &str, q: f32) -> (String, &'static str) {
             "profile",
         ),
         "ffv1" => ("lossless".into(), ""),
-        _ => (lerp(38.0, 10.0).to_string(), "QP"),
+        // Below QP ~18 hardware encoders produce huge streams (600+ Mbit/s at 1080p120)
+        // that players cannot decode smoothly, with no visible gain.
+        _ => (lerp(38.0, 18.0).to_string(), "QP"),
     }
 }
 
@@ -540,6 +542,9 @@ pub fn encode_cmd(settings: &Settings, sys: &System, job: &EncodeJob) -> Command
     c.args(["-vf", &video_filter(eng, job.final_size, pix)]);
 
     let (q, _) = native_quality(enc, e.quality);
+    // P and B frames get the usual +2 / +4 QP offsets: about 25 % smaller files at the same look.
+    let qn: i64 = q.parse().unwrap_or(22);
+    let (qp, qb) = ((qn + 2).to_string(), (qn + 4).to_string());
     let sp = e.speed;
     let pick = |fast: &'static str, mid: &'static str, best: &'static str| match sp {
         Speed::Fast => fast,
@@ -549,10 +554,10 @@ pub fn encode_cmd(settings: &Settings, sys: &System, job: &EncodeJob) -> Command
     c.args(["-c:v", enc]);
     match enc {
         "hevc_amf" | "h264_amf" => {
-            c.args(["-quality", pick("speed", "balanced", "quality"), "-rc", "cqp", "-qp_i", &q, "-qp_p", &q, "-qp_b", &q]);
+            c.args(["-quality", pick("speed", "balanced", "quality"), "-rc", "cqp", "-qp_i", &q, "-qp_p", &qp, "-qp_b", &qb]);
         }
         "av1_amf" => {
-            c.args(["-quality", pick("speed", "balanced", "high_quality"), "-rc", "cqp", "-qp_i", &q, "-qp_p", &q]);
+            c.args(["-quality", pick("speed", "balanced", "high_quality"), "-rc", "cqp", "-qp_i", &q, "-qp_p", &qp]);
         }
         "h264_nvenc" | "hevc_nvenc" | "av1_nvenc" => {
             c.args(["-preset", pick("p2", "p5", "p7"), "-tune", "hq", "-rc", "constqp", "-qp", &q]);
@@ -632,8 +637,8 @@ mod tests {
 
     #[test]
     fn quality_maps_to_native_ranges() {
-        assert_eq!(native_quality("libx265", 75.0).0, "17");
-        assert_eq!(native_quality("hevc_amf", 100.0).0, "10");
+        assert_eq!(native_quality("libx265", 75.0).0, "19");
+        assert_eq!(native_quality("hevc_amf", 100.0).0, "18");
         assert_eq!(native_quality("hevc_videotoolbox", 0.0).0, "40");
         assert_eq!(native_quality("ffv1", 50.0).0, "lossless");
     }
