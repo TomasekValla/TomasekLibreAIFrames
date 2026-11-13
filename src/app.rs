@@ -841,8 +841,11 @@ impl App {
                     .corner_radius(egui::CornerRadius::same(9))
                     .inner_margin(egui::Margin::same(9))
                     .stroke(egui::Stroke::new(1.0, if sel { accent() } else { line() }));
-                let resp = frame
-                    .show(ui, |ui| {
+                // The card's click area is registered before its content, so the buttons on it (remove, show)
+                // stay on top and get their clicks; registered afterwards it swallowed them.
+                let resp = ui
+                    .scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+                    frame.show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
                             let name = it.path.file_name().unwrap_or_default().to_string_lossy().to_string();
@@ -898,9 +901,10 @@ impl App {
                                 ui.label(RichText::new(n).color(warn()).small());
                             }
                         }
+                    });
                     })
                     .response;
-                if resp.interact(egui::Sense::click()).clicked() {
+                if resp.clicked() {
                     self.selected = Some(i);
                 }
                 ui.add_space(2.0);
@@ -1211,3 +1215,53 @@ pub fn badge(ui: &mut Ui, text: &str, color: Color32) -> egui::Response {
 /// The smallest layout the window is designed for, in points at 100 %.
 /// The UI size is capped so the window always has at least this much room.
 const MIN_LAYOUT: egui::Vec2 = egui::vec2(1040.0, 620.0);
+
+#[cfg(test)]
+mod tests {
+    // A clickable card with a button on it: the button must get the click (it did not when the card's
+    // click area was registered after the content).
+    fn click_button(card_first: bool) -> (bool, bool) {
+        let ctx = egui::Context::default();
+        let (mut button_rect, mut button, mut card) = (egui::Rect::NOTHING, false, false);
+        for frame in 0..4 {
+            let mut input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))), ..Default::default() };
+            if frame >= 1 {
+                let p = button_rect.center();
+                input.events.push(egui::Event::PointerMoved(p));
+                if frame == 2 {
+                    input.events.push(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+                    input.events.push(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+                }
+            }
+            let mut out = ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    if card_first {
+                        let r = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+                            ui.set_min_size(egui::vec2(300.0, 80.0));
+                            let b = ui.button("x");
+                            button_rect = b.rect;
+                            button |= b.clicked();
+                        });
+                        card |= r.response.clicked();
+                    } else {
+                        let r = egui::Frame::new().show(ui, |ui| {
+                            ui.set_min_size(egui::vec2(300.0, 80.0));
+                            let b = ui.button("x");
+                            button_rect = b.rect;
+                            button |= b.clicked();
+                        });
+                        card |= r.response.interact(egui::Sense::click()).clicked();
+                    }
+                });
+            });
+            out.textures_delta.clear();
+        }
+        (button, card)
+    }
+
+    #[test]
+    fn buttons_on_a_clickable_card_get_their_clicks() {
+        assert_eq!(click_button(false), (false, true), "old layout: the card swallowed the click");
+        assert_eq!(click_button(true), (true, false), "new layout: the button gets the click");
+    }
+}

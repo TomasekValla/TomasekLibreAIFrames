@@ -366,8 +366,14 @@ pub fn fmt_bytes(b: u64) -> String {
 
 /// Open a file manager at a file (selected) or folder.
 pub fn reveal(path: &std::path::Path) {
+    // Explorer wants the path in quotes right after "/select," (/select,"C:/dir with spaces/file");
+    // the normal argument quoting ("/select,C:/...") makes it open the Documents folder instead.
     #[cfg(windows)]
-    let _ = std::process::Command::new("explorer").arg(if path.is_file() { format!("/select,{}", path.display()) } else { path.display().to_string() }).spawn();
+    {
+        use std::os::windows::process::CommandExt;
+        let arg = if path.is_file() { format!("/select,\"{}\"", path.display()) } else { format!("\"{}\"", path.display()) };
+        let _ = std::process::Command::new("explorer").raw_arg(arg).spawn();
+    }
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").args(if path.is_file() { vec!["-R"] } else { vec![] }).arg(path).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]

@@ -20,6 +20,25 @@ pub fn tool(settings: &Settings, name: &str) -> PathBuf {
     if own.exists() {
         return own;
     }
+    // Apps started from Finder, the Dock or a desktop menu do not get the shell's PATH, so Homebrew,
+    // MacPorts and user installs are not found by name: look in the usual places first.
+    #[cfg(unix)]
+    {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        for dir in [
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/opt/local/bin"),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/snap/bin"),
+            home.join(".local/bin"),
+        ] {
+            let p = dir.join(&exe);
+            if p.is_file() {
+                return p;
+            }
+        }
+    }
     PathBuf::from(name)
 }
 
