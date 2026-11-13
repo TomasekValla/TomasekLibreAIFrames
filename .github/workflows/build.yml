@@ -93,6 +93,11 @@ jobs:
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           EOF
+          # Sign the whole bundle ad hoc (no Apple account needed) after everything is in place: a bundle whose
+          # files changed after linking has a broken signature, and macOS calls a downloaded one "damaged".
+          codesign --force --sign - "$app/Contents/MacOS/libwebgpu_dawn.dylib" 2>/dev/null || true
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
           cp LICENSE THIRD_PARTY_NOTICES.md README.md dist/
           (cd dist && zip -qry "TomasekLibreAIFrames-${{ matrix.name }}.zip" TomasekLibreAIFrames.app LICENSE THIRD_PARTY_NOTICES.md README.md && shasum -a 256 "TomasekLibreAIFrames-${{ matrix.name }}.zip" > "TomasekLibreAIFrames-${{ matrix.name }}.zip.sha256")
 

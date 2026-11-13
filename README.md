@@ -29,6 +29,8 @@ One command, no administrator rights; it downloads the newest release, checks it
 | Linux | `curl -fsSL https://raw.githubusercontent.com/TomasekValla/TomasekLibreAIFrames/main/install/linux.sh \| sh` |
 | macOS (Apple Silicon) | `curl -fsSL https://raw.githubusercontent.com/TomasekValla/TomasekLibreAIFrames/main/install/macos.sh \| sh` |
 
+macOS: the app is not signed with a paid Apple certificate. With the command above (or the in-app update) nothing extra is needed. A zip downloaded in a browser gets a quarantine flag; if macOS refuses to open it, allow it in System Settings → Privacy & Security → Open Anyway, or run `xattr -dr com.apple.quarantine TomasekLibreAIFrames.app`.
+
 Linux takes the WebGPU build (any GPU through Vulkan); set `TLAF_VARIANT=cuda`, `rocm` or `cpu` before `sh` for another one. `TLAF_PRERELEASE=1` installs the newest pre-release.
 
 ## Download
