@@ -1,6 +1,6 @@
 [package]
 name = "tomasek-libre-ai-frames"
-version = "0.2.0"
+version = "0.9.0"
 edition = "2021"
 description = "TomasekLibreAIFrames - AI video frame interpolation and upscaling (ONNX Runtime)"
 license = "GPL-3.0-or-later"
