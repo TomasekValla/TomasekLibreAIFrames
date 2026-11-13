@@ -109,7 +109,7 @@ pub struct App {
     pub mem_now: MemUse,
     mem_at: Option<Instant>,
     pub update: crate::update::UpdateState,
-    update_progress: Arc<std::sync::atomic::AtomicU32>,
+    pub update_progress: Arc<std::sync::atomic::AtomicU32>,
     tray: Option<crate::tray::Tray>,
     tray_rx: Option<Receiver<crate::tray::TrayMsg>>,
     hidden: bool,
@@ -169,6 +169,9 @@ impl App {
             let (ttx, trx) = channel();
             app.tray = crate::tray::create(cc.egui_ctx.clone(), ttx);
             app.tray_rx = Some(trx);
+        }
+        if std::env::args().any(|a| a == "--after-update") {
+            app.notify(crate::trf!("Aktualizováno na {}", "Updated to {}", crate::update::current_version()), good());
         }
         if app.s.setup_done && app.s.update_check {
             app.check_update(&cc.egui_ctx);
@@ -478,7 +481,8 @@ impl App {
             }
         }
         // Finished while hidden: install a waiting update.
-        if self.running.is_none() {
+        // Take the state out only when an update is waiting: taking it every frame wiped every check result.
+        if self.running.is_none() && matches!(self.update, crate::update::UpdateState::Ready(..)) {
             if let crate::update::UpdateState::Ready(info, file) = std::mem::take(&mut self.update) {
                 if let Err(e) = crate::update::apply(&info, &file) {
                     self.update = crate::update::UpdateState::Error(e);
@@ -749,8 +753,12 @@ impl App {
                 }
                 if let Some((m, c, t)) = &self.message {
                     if t.elapsed() < Duration::from_secs(6) && room > 60.0 {
-                        ui.set_max_width(room);
-                        ui.add(egui::Label::new(RichText::new(m).color(*c)).truncate()).on_hover_text(m);
+                        // Its own box of at most the free room, next to the badges (never over them).
+                        let text_w = ui.painter().layout_no_wrap(m.clone(), egui::TextStyle::Body.resolve(ui.style()), *c).size().x;
+                        let size = egui::vec2(text_w.min(room - 8.0), ui.spacing().interact_size.y);
+                        ui.allocate_ui_with_layout(size, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add(egui::Label::new(RichText::new(m).color(*c)).truncate()).on_hover_text(m);
+                        });
                     }
                 }
                 let ctx = ui.ctx().clone();

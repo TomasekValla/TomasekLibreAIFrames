@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 pub fn wanted() -> bool {
-    std::env::args().skip(1).any(|a| matches!(a.as_str(), "--process" | "--bench" | "--encoders" | "--still" | "--eval-x4" | "--fetch" | "--help"))
+    std::env::args().skip(1).any(|a| matches!(a.as_str(), "--process" | "--bench" | "--encoders" | "--still" | "--eval-x4" | "--fetch" | "--update" | "--help"))
 }
 
 pub fn run() -> i32 {
@@ -35,6 +35,43 @@ pub fn run() -> i32 {
                 println!("--codec hevc|av1|h264|prores|ffv1  --engine auto|cpu|amf|nvenc|qsv|vaapi|videotoolbox  --quality 0-100  --out-dir DIR");
                 println!("--bench MODEL_ID  --encoders  --eval-x4 FILE START_S GROUPS (x4 vs real frames of a high-fps clip)");
                 return 0;
+            }
+            "--update" => {
+                // Check GitHub and install a newer release next to this exe (no restart).
+                println!("this build: {}", crate::update::current_version());
+                let code = match crate::update::check() {
+                    Ok(Some(info)) => {
+                        println!("found {} ({:?})", info.version, info.mode);
+                        match crate::update::download(&info, &|f| eprint!("{}downloading {:.0} %", char::from(13u8), f * 100.0)) {
+                            Ok(file) => {
+                                eprintln!();
+                                match crate::update::install_files(&file) {
+                                    Ok(()) => {
+                                        println!("installed {}", info.version);
+                                        0
+                                    }
+                                    Err(e) => {
+                                        println!("install failed: {e}");
+                                        1
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                println!("download failed: {e}");
+                                1
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        println!("up to date");
+                        0
+                    }
+                    Err(e) => {
+                        println!("check failed: {e}");
+                        1
+                    }
+                };
+                return code;
             }
             "--fetch" => {
                 // --fetch URL FILE CONNECTIONS : download speed test

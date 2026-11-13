@@ -396,6 +396,7 @@ impl App {
         let mut open = true;
         let screen = ctx.content_rect();
         let mut check_now = false;
+        let mut update_now = None;
         egui::Window::new(RichText::new(crate::tr!("Nastavení", "Settings")).font(theme::bold(18.0)))
             .open(&mut open)
             .collapsible(false)
@@ -459,6 +460,25 @@ impl App {
                                 _ => {}
                             }
                         });
+                        // A found update is offered here too, not only in the top bar.
+                        match &self.update {
+                            crate::update::UpdateState::Available(info) => {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new(crate::trf!("Nová verze {}", "New version {}", info.version)).color(accent_fg()).strong());
+                                    if ui.add(theme::primary_button(crate::tr!("Aktualizovat", "Update"))).clicked() {
+                                        update_now = Some(info.clone());
+                                    }
+                                });
+                            }
+                            crate::update::UpdateState::Downloading(_) => {
+                                let p = self.update_progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10.0;
+                                ui.label(RichText::new(format!("{} {p:.0} %", crate::tr!("Stahuji aktualizaci", "Downloading update"))).color(accent_fg()).small());
+                            }
+                            crate::update::UpdateState::Ready(info, _) => {
+                                ui.label(RichText::new(crate::trf!("Verze {} se nainstaluje po dokončení fronty", "Version {} installs when the queue is done", info.version)).color(accent_fg()).small());
+                            }
+                            _ => {}
+                        }
                         ui.separator();
                         ui.label(RichText::new(crate::tr!("Systém", "System")).strong());
                         let mut shell_err = None;
@@ -480,6 +500,9 @@ impl App {
                         }
                 });
             });
+        if let Some(info) = update_now {
+            self.start_update(ctx, info);
+        }
         if check_now {
             self.check_update(ctx);
         }

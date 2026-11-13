@@ -32,7 +32,19 @@ fn main() -> eframe::Result<()> {
     cleanup::remove_stale_parts();
     // A second start hands its files to the window that is already open (like TomasekConvert).
     let files: Vec<std::path::PathBuf> = std::env::args().skip(1).filter(|a| !a.starts_with("--")).map(std::path::PathBuf::from).collect();
-    if instance::acquire() == instance::Role::Secondary {
+    // Right after an update the old version may still be closing: wait for it to let go
+    // instead of handing our files to a window that is about to disappear.
+    let mut role = instance::acquire();
+    if std::env::args().any(|a| a == "--after-update") {
+        for _ in 0..50 {
+            if role == instance::Role::Primary {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            role = instance::acquire();
+        }
+    }
+    if role == instance::Role::Secondary {
         let msg = instance::hand_over(&files);
         if instance::wait_consumed(&msg, std::time::Duration::from_secs(3)) {
             return Ok(());
@@ -40,7 +52,8 @@ fn main() -> eframe::Result<()> {
     }
     // Keep the Explorer integration pointing at this exe: the app may run from a new folder
     // (another download, an update, a moved folder) while the old entries point elsewhere.
-    {
+    // Release builds only: a local development build must not take the entries over.
+    if option_env!("TLAF_VERSION").is_some_and(|v| !v.trim().is_empty()) {
         let s = settings::Settings::load();
         std::thread::spawn(move || {
             if s.context_menu {

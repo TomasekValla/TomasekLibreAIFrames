@@ -264,6 +264,15 @@ pub fn apply(info: &UpdateInfo, archive: &Path) -> Result<(), String> {
         crate::hw::open_url(&info.url);
         return Ok(());
     }
+    install_files(archive)?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    std::process::Command::new(&exe).arg("--after-update").spawn().map_err(|e| e.to_string())?;
+    crate::instance::release();
+    std::process::exit(0)
+}
+
+/// Replace the program's files with the ones from the archive (old ones are kept as *.old until the next start).
+pub fn install_files(archive: &Path) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let app_dir = exe.parent().ok_or("no program folder")?.to_path_buf();
     let staging = update_dir().join("new");
@@ -299,9 +308,7 @@ pub fn apply(info: &UpdateInfo, archive: &Path) -> Result<(), String> {
         }
         done.push((target, old));
     }
-    std::process::Command::new(&exe).arg("--after-update").spawn().map_err(|e| e.to_string())?;
-    crate::instance::release();
-    std::process::exit(0)
+    Ok(())
 }
 
 fn rollback(done: &[(PathBuf, PathBuf)]) {
