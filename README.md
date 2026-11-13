@@ -19,9 +19,21 @@ AI video **frame interpolation** (RIFE 4.x) and **upscaling** (AnimeJaNai, Ani4K
 
 How it works and why it is built this way: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Install
+
+One command, no administrator rights; it downloads the newest release, checks its SHA-256 and installs it for your user:
+
+| System | Command |
+|---|---|
+| Windows (PowerShell) | `irm https://raw.githubusercontent.com/TomasekValla/TomasekLibreAIFrames/main/install/windows.ps1 \| iex` |
+| Linux | `curl -fsSL https://raw.githubusercontent.com/TomasekValla/TomasekLibreAIFrames/main/install/linux.sh \| sh` |
+| macOS (Apple Silicon) | `curl -fsSL https://raw.githubusercontent.com/TomasekValla/TomasekLibreAIFrames/main/install/macos.sh \| sh` |
+
+Linux takes the WebGPU build (any GPU through Vulkan); set `TLAF_VARIANT=cuda`, `rocm` or `cpu` before `sh` for another one. `TLAF_PRERELEASE=1` installs the newest pre-release.
+
 ## Download
 
-Get a build from [Releases](../../releases):
+Or get a build from [Releases](../../releases):
 
 | System | File |
 |---|---|

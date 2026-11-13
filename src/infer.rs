@@ -249,6 +249,18 @@ pub struct Net {
     max_px: Option<usize>,
     /// Largest input per pass that fits the memory budget (keeps each GPU call short and small).
     budget_px: Option<usize>,
+    /// Rows inside every tile that this backend computes wrongly (start, end); tiles are laid out
+    /// so that no output row is taken from them.
+    bad_rows: Option<(usize, usize)>,
+}
+
+/// Known backend defects: RealPLKSR (DySample upsampler, static 256 px input) on DirectML returns
+/// wrong values for input rows ~116-134 and ~246-256 of every tile (up to 26/255 off, measured against
+/// the CPU), which shows as horizontal stripes. Columns are fine. The bottom band is avoided by never
+/// using a tile's last overlap/2 rows: the last tile hangs past the image edge instead.
+fn known_bad_rows(path: &Path, ai: Ai) -> Option<(usize, usize)> {
+    let name = path.file_name()?.to_string_lossy().to_lowercase();
+    (ai == Ai::DirectMl && name.contains("realplksr")).then_some((114, 136))
 }
 
 /// DirectML silently returns garbage once an internal tensor passes 2^31 bytes (RIFE: about a 2048x2048 input),
@@ -307,7 +319,7 @@ impl Net {
             (Some(&h), Some(&w)) if h > 0 && w > 0 => Some(h.min(w) as usize),
             _ => None,
         };
-        let mut net = Net { session, env, path: path.to_path_buf(), target: t.clone(), used, fallback_reason, f16, scale: 1, pad: pad.max(1), fixed, max_px: max_pixels(used), budget_px: None };
+        let mut net = Net { session, env, path: path.to_path_buf(), target: t.clone(), used, fallback_reason, f16, scale: 1, pad: pad.max(1), fixed, max_px: max_pixels(used), budget_px: None, bad_rows: known_bad_rows(path, used) };
         if in_channels == 3 {
             net.scale = net.detect_scale()?;
         }
@@ -432,23 +444,65 @@ impl Net {
             return Ok(out);
         }
         let overlap = overlap.min(tw / 2).min(th / 2);
-        let starts = |len: usize, t: usize| -> Vec<usize> {
+        let starts = |len: usize, t: usize, step: usize| -> Vec<usize> {
             if len <= t {
                 return vec![0];
             }
-            let step = (t - overlap).max(1);
-            let mut v: Vec<usize> = (0..).map(|k| k * step).take_while(|&p| p + t < len).collect();
+            let mut v: Vec<usize> = (0..).map(|k| k * step.max(1)).take_while(|&p| p + t < len).collect();
             v.push(len - t);
             v
         };
-        for &y0 in &starts(x.h, th) {
-            for &x0 in &starts(x.w, tw) {
+        let xs = starts(x.w, tw, tw - overlap);
+        // A known bad band in the tile's rows: step so that every row is good in some tile,
+        // using the rows above and below the band.
+        let bad = self.bad_rows.filter(|&(a, b)| b < th && a > overlap / 2 && th < x.h);
+        let ys = match bad {
+            Some((a, b)) => {
+                let mut v = starts(x.h, th, (a - overlap / 2).min(th - overlap - (b - a)));
+                // The last tile reaches overlap/2 rows past the image (edge pixels repeated).
+                if let Some(l) = v.last_mut() {
+                    *l = x.h + overlap / 2 - th;
+                }
+                v
+            }
+            None => starts(x.h, th, th - overlap),
+        };
+        // For every input row: the tile row index and the row inside that tile it is taken from.
+        let pick: Vec<(usize, usize)> = (0..x.h)
+            .map(|y| {
+                let good = |j: usize, r: usize| {
+                    let y0 = ys[j];
+                    let lo = if y0 == 0 { 0 } else { overlap / 2 };
+                    let hi = if y0 + th >= x.h && bad.is_none() { th } else { th - overlap / 2 };
+                    r >= lo && r < hi && bad.is_none_or(|(a, b)| r < a || r >= b)
+                };
+                let cands = || ys.iter().enumerate().filter(|&(_, &y0)| y >= y0 && y < y0 + th).map(|(j, &y0)| (j, y - y0));
+                // Last good tile wins (like the plain layout); if none is good, the most central one.
+                cands().filter(|&(j, r)| good(j, r)).last().unwrap_or_else(|| cands().min_by_key(|&(_, r)| r.abs_diff(th / 2)).unwrap())
+            })
+            .collect();
+        for (j, &y0) in ys.iter().enumerate() {
+            for &x0 in &xs {
+                if !pick.iter().any(|&(pj, _)| pj == j) {
+                    continue;
+                }
                 let r = self.run_safe(&x.region(x0 as isize, y0 as isize, self.padded(tw), self.padded(th)))?;
                 let lt = if x0 == 0 { 0 } else { overlap / 2 };
-                let tp = if y0 == 0 { 0 } else { overlap / 2 };
                 let rt = if x0 + tw >= x.w { 0 } else { overlap / 2 };
-                let bt = if y0 + th >= x.h { 0 } else { overlap / 2 };
-                out.paste(&r, lt * s, tp * s, (tw - lt - rt) * s, (th - tp - bt) * s, (x0 + lt) * s, (y0 + tp) * s);
+                // Paste each run of rows this tile was picked for.
+                let mut y = 0;
+                while y < x.h {
+                    if pick[y].0 != j {
+                        y += 1;
+                        continue;
+                    }
+                    let start = y;
+                    while y < x.h && pick[y].0 == j {
+                        y += 1;
+                    }
+                    let r0 = pick[start].1;
+                    out.paste(&r, lt * s, r0 * s, (tw - lt - rt) * s, (y - start) * s, (x0 + lt) * s, start * s);
+                }
             }
         }
         Ok(out)

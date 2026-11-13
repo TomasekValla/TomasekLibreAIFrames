@@ -132,7 +132,7 @@ pub const CATALOG: &[Entry] = &[
         download_size: PACK_SIZE, size: 2_490_781, sha256: "58425bdf2a28df7109aeefdc94d1b7366eac85414f6cd6f2fba41259f9d3307f", recommended: false },
     // ---- real-life upscaling ----
     Entry { id: "real/2xPublic_realplksr_dysample_layernorm_real_fp32_op17.onnx", name: "RealPLKSR 2x Real", kind: Kind::Upscale, content: Content::RealLife, scale: Some(2), quality: 8.7, speed: 1, mb_per_mp: 2000.0,
-        desc: "Real footage 2x, newest model here (2025). Natural look without invented detail. Very slow for video: it only accepts 256 px tiles.",
+        desc: "Real footage 2x, newest model here (2025). Natural look without invented detail. Very slow for video: it only accepts 256 px tiles, and on DirectML (Windows) it runs about 2x slower again to avoid a driver stripe defect.",
         license: "see source", source: "https://github.com/Phhofm/models/releases/tag/2xPublic_realplksr_dysample_layernorm_real", url: url!(PHH, "/2xPublic_realplksr_dysample_layernorm_real/2xPublic_realplksr_dysample_layernorm_real_fp32_op17.onnx"), inner: None,
         download_size: 29_792_727, size: 29_792_727, sha256: "4c5c658893c927af11238d4aa767a7cb0bfcae773b98a7da3a6c486efa024f5f", recommended: false },
     Entry { id: "real/4xNomos2_otf_esrgan_fp16_opset17.onnx", name: "Nomos2 OTF ESRGAN 4x", kind: Kind::Upscale, content: Content::RealLife, scale: Some(4), quality: 8.5, speed: 1, mb_per_mp: 7000.0,
@@ -261,8 +261,34 @@ pub fn sha256_file(p: &Path) -> Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Download `url` to `to`. Big files come in pieces over several connections at once: a single
+/// connection to GitHub's file servers is sometimes throttled to ~1-2 MB/s, several are not.
 pub fn fetch(url: &str, to: &Path, st: &DownloadState) -> Result<()> {
-    let mut resp = agent().get(url).header("User-Agent", "TomasekLibreAIFrames").call().with_context(|| format!("download failed: {url}"))?;
+    fetch_with(url, to, st, 8)
+}
+
+const PIECE: u64 = 16 << 20;
+
+pub fn fetch_with(url: &str, to: &Path, st: &DownloadState, connections: usize) -> Result<()> {
+    let agent = agent();
+    match remote_size(&agent, url) {
+        Some(size) if connections > 1 && size > PIECE => fetch_parallel(&agent, url, to, st, size, connections),
+        _ => fetch_single(&agent, url, to, st),
+    }
+}
+
+/// Total size, if the server supports byte ranges (it answers a one-byte range with 206).
+fn remote_size(agent: &ureq::Agent, url: &str) -> Option<u64> {
+    let resp = agent.get(url).header("User-Agent", "TomasekLibreAIFrames").header("Range", "bytes=0-0").call().ok()?;
+    if resp.status().as_u16() != 206 {
+        return None;
+    }
+    let cr = resp.headers().get("content-range")?.to_str().ok()?;
+    cr.rsplit('/').next()?.trim().parse().ok()
+}
+
+fn fetch_single(agent: &ureq::Agent, url: &str, to: &Path, st: &DownloadState) -> Result<()> {
+    let mut resp = agent.get(url).header("User-Agent", "TomasekLibreAIFrames").call().with_context(|| format!("download failed: {url}"))?;
     let mut r = resp.body_mut().as_reader();
     let mut f = std::fs::File::create(to)?;
     let mut buf = vec![0u8; 1 << 20];
@@ -278,6 +304,81 @@ pub fn fetch(url: &str, to: &Path, st: &DownloadState) -> Result<()> {
         st.done.fetch_add(n as u64, Ordering::Relaxed);
     }
     Ok(())
+}
+
+/// Workers take 16 MB pieces from a shared counter, so a slow connection never holds up the end
+/// for long. A failed piece is retried from where it stopped.
+fn fetch_parallel(agent: &ureq::Agent, url: &str, to: &Path, st: &DownloadState, size: u64, connections: usize) -> Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let f = std::fs::File::create(to)?;
+    f.set_len(size)?;
+    drop(f);
+    let pieces = size.div_ceil(PIECE);
+    let next = AtomicU64::new(0);
+    let failed: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
+    std::thread::scope(|scope| {
+        for _ in 0..connections.min(pieces as usize) {
+            scope.spawn(|| {
+                let run = || -> Result<()> {
+                    let mut f = std::fs::OpenOptions::new().write(true).open(to)?;
+                    let mut buf = vec![0u8; 1 << 20];
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= pieces || failed.lock().unwrap().is_some() {
+                            return Ok(());
+                        }
+                        let end = ((i + 1) * PIECE).min(size); // exclusive
+                        let mut pos = i * PIECE;
+                        let mut tries = 0;
+                        while pos < end {
+                            if st.cancel.load(Ordering::Relaxed) {
+                                return Err(anyhow!("cancelled"));
+                            }
+                            let got = (|| -> Result<()> {
+                                let mut resp = agent
+                                    .get(url)
+                                    .header("User-Agent", "TomasekLibreAIFrames")
+                                    .header("Range", &format!("bytes={pos}-{}", end - 1))
+                                    .call()?;
+                                if resp.status().as_u16() != 206 {
+                                    return Err(anyhow!("server ignored the byte range"));
+                                }
+                                let mut r = resp.body_mut().as_reader();
+                                f.seek(SeekFrom::Start(pos))?;
+                                while pos < end {
+                                    if st.cancel.load(Ordering::Relaxed) {
+                                        return Err(anyhow!("cancelled"));
+                                    }
+                                    let n = r.read(&mut buf[..((end - pos) as usize).min(1 << 20)])?;
+                                    if n == 0 {
+                                        return Err(anyhow!("connection closed early"));
+                                    }
+                                    f.write_all(&buf[..n])?;
+                                    pos += n as u64;
+                                    st.done.fetch_add(n as u64, Ordering::Relaxed);
+                                }
+                                Ok(())
+                            })();
+                            if let Err(e) = got {
+                                tries += 1;
+                                if tries > 5 || st.cancel.load(Ordering::Relaxed) {
+                                    return Err(e.context(format!("download failed: {url}")));
+                                }
+                                std::thread::sleep(std::time::Duration::from_secs(tries));
+                            }
+                        }
+                    }
+                };
+                if let Err(e) = run() {
+                    failed.lock().unwrap().get_or_insert(e);
+                }
+            });
+        }
+    });
+    match failed.into_inner().unwrap() {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// Download the given catalog entries into `dir`. Entries sharing one archive are fetched once.

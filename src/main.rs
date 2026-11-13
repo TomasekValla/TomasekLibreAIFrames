@@ -38,6 +38,22 @@ fn main() -> eframe::Result<()> {
             return Ok(());
         }
     }
+    // Keep the Explorer integration pointing at this exe: the app may run from a new folder
+    // (another download, an update, a moved folder) while the old entries point elsewhere.
+    {
+        let s = settings::Settings::load();
+        std::thread::spawn(move || {
+            if s.context_menu {
+                let _ = shell::set_context_menu(true);
+            }
+            if s.open_with {
+                let _ = shell::set_open_with(true);
+            }
+            if shell::shortcut_exists() {
+                let _ = shell::create_start_shortcut();
+            }
+        });
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("TomasekLibreAIFrames")

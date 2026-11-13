@@ -53,20 +53,44 @@ pub enum UpdateState {
     Error(String),
 }
 
-fn parse_ver(s: &str) -> Vec<u64> {
-    s.trim().trim_start_matches(['v', 'V']).split(['-', '+']).next().unwrap_or("").split('.').map(|p| p.parse().unwrap_or(0)).collect()
+/// "v1.2.3-pre.4+build" -> ([1, 2, 3], Some(["pre", "4"])).
+fn parse_ver(s: &str) -> (Vec<u64>, Option<Vec<String>>) {
+    let s = s.trim().trim_start_matches(['v', 'V']);
+    let s = s.split('+').next().unwrap_or("");
+    let (core, pre) = match s.split_once('-') {
+        Some((c, p)) => (c, Some(p.split('.').map(str::to_string).collect())),
+        None => (s, None),
+    };
+    (core.split('.').map(|p| p.parse().unwrap_or(0)).collect(), pre)
 }
 
-/// Is `latest` newer than `current`? (numeric 1.2.3 comparison; pre-release suffixes are ignored)
+/// Is `latest` newer than `current`? Semantic-version order: 0.2.0-pre.2 < 0.2.0-pre.3 < 0.2.0.
 pub fn is_newer(latest: &str, current: &str) -> bool {
-    let (a, b) = (parse_ver(latest), parse_ver(current));
+    use std::cmp::Ordering::*;
+    let ((a, ap), (b, bp)) = (parse_ver(latest), parse_ver(current));
     for i in 0..a.len().max(b.len()) {
         let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
         if x != y {
             return x > y;
         }
     }
-    false
+    match (ap, bp) {
+        (None, None) => false,
+        (None, Some(_)) => true,
+        (Some(_), None) => false,
+        (Some(x), Some(y)) => {
+            for (p, q) in x.iter().zip(&y) {
+                let o = match (p.parse::<u64>(), q.parse::<u64>()) {
+                    (Ok(m), Ok(n)) => m.cmp(&n),
+                    _ => p.cmp(q),
+                };
+                if o != Equal {
+                    return o == Greater;
+                }
+            }
+            x.len() > y.len()
+        }
+    }
 }
 
 /// The release archive of this exact build (the Linux backend variant matters).
@@ -116,8 +140,12 @@ fn agent(timeout: u64) -> ureq::Agent {
     ureq::Agent::config_builder().tls_config(tls).timeout_global(Some(Duration::from_secs(timeout))).build().into()
 }
 
+/// Release builds get the exact tag (e.g. 0.2.0-pre.2) from CI; local builds use Cargo.toml.
 pub fn current_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    match option_env!("TLAF_VERSION") {
+        Some(v) if !v.trim().is_empty() => v.trim().trim_start_matches(['v', 'V']),
+        _ => env!("CARGO_PKG_VERSION"),
+    }
 }
 
 pub fn check() -> Result<Option<UpdateInfo>, String> {
@@ -339,6 +367,11 @@ mod tests {
         assert!(is_newer("0.10.0", "0.9.0"));
         assert!(!is_newer("0.1.0", "0.1.0"));
         assert!(!is_newer("v0.1.0-pre.1", "0.1.0"));
+        assert!(is_newer("v0.2.0-pre.2", "0.1.0"));
+        assert!(is_newer("v0.2.0-pre.3", "0.2.0-pre.2"));
+        assert!(is_newer("v0.2.0", "0.2.0-pre.3"));
+        assert!(!is_newer("v0.2.0-pre.2", "0.2.0-pre.2"));
+        assert!(!is_newer("v0.2.0-pre.2", "0.2.0"));
     }
 
     #[test]

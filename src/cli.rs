@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 pub fn wanted() -> bool {
-    std::env::args().skip(1).any(|a| matches!(a.as_str(), "--process" | "--bench" | "--encoders" | "--still" | "--eval-x4" | "--help"))
+    std::env::args().skip(1).any(|a| matches!(a.as_str(), "--process" | "--bench" | "--encoders" | "--still" | "--eval-x4" | "--fetch" | "--help"))
 }
 
 pub fn run() -> i32 {
@@ -34,6 +34,19 @@ pub fn run() -> i32 {
                 println!("--process FILE  --multiplier X  --fps X  --interp-model ID  --no-interp  --upscale ID  --upscale-res WxH  --tile N");
                 println!("--codec hevc|av1|h264|prores|ffv1  --engine auto|cpu|amf|nvenc|qsv|vaapi|videotoolbox  --quality 0-100  --out-dir DIR");
                 println!("--bench MODEL_ID  --encoders  --eval-x4 FILE START_S GROUPS (x4 vs real frames of a high-fps clip)");
+                return 0;
+            }
+            "--fetch" => {
+                // --fetch URL FILE CONNECTIONS : download speed test
+                let url = next(&mut i);
+                let file = PathBuf::from(next(&mut i));
+                let conns: usize = next(&mut i).parse().unwrap_or(8);
+                let st = crate::models::DownloadState::default();
+                let t0 = std::time::Instant::now();
+                let r = crate::models::fetch_with(&url, &file, &st, conns);
+                let secs = t0.elapsed().as_secs_f64();
+                let mb = st.done.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6;
+                println!("{conns} connections: {mb:.0} MB in {secs:.1} s = {:.1} MB/s {:?}", mb / secs, r.err());
                 return 0;
             }
             "--process" => inputs.push(PathBuf::from(next(&mut i))),
