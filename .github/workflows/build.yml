@@ -31,6 +31,8 @@ jobs:
           - { name: macos-apple-silicon,  os: macos-latest,       features: "",         kind: macos }
     env:
       ORT_CUDA_VERSION: "13"
+      # The prebuilt ONNX Runtime / WebGPU (Dawn) libraries target macOS 13.4.
+      MACOSX_DEPLOYMENT_TARGET: "13.4"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -85,7 +87,7 @@ jobs:
             <key>CFBundleExecutable</key><string>TomasekLibreAIFrames</string>
             <key>CFBundleIdentifier</key><string>cz.tomasekvalla.libreaiframes</string>
             <key>CFBundlePackageType</key><string>APPL</string>
-            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>LSMinimumSystemVersion</key><string>13.4</string>
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           EOF

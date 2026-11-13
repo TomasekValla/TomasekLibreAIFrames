@@ -26,7 +26,7 @@ Get a build from [Releases](../../releases):
 | System | File |
 |---|---|
 | Windows 10/11 x64 | `windows-x64.zip` |
-| macOS 12+ on Apple Silicon (M1 or newer) | `macos-apple-silicon.zip` |
+| macOS 13.4+ on Apple Silicon (M1 or newer) | `macos-apple-silicon.zip` |
 | Linux x64, any GPU (Vulkan) | `linux-x64-webgpu.tar.gz` |
 | Linux x64, NVIDIA (needs CUDA 13 + cuDNN) | `linux-x64-cuda.tar.gz` |
 | Linux x64, AMD (needs ROCm) | `linux-x64-rocm.tar.gz` |
