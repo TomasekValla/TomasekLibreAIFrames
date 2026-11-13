@@ -875,8 +875,14 @@ pub fn benchmark(s: &Settings, sys: &System, model: &ModelInfo) -> Result<Bench>
     let mut mem = crate::hw::MemProbe::new();
     let before = mem_now(&mut mem, sys, &t);
     let pad = if interp { s.perf.pad_multiple.max(1) as usize } else { 8 };
-    // Fresh load so the memory delta is real.
+    // Fresh load so the memory delta is real. Progress goes to stderr: the CLI benchmark can take minutes.
+    eprintln!("loading {} for {}...", model.id, t.ai.short());
+    let t_load = Instant::now();
     let mut net = Net::load(env()?, &model.path, &t, pad)?;
+    eprintln!("  loaded in {:.1} s, running on {}", t_load.elapsed().as_secs_f32(), net.used.short());
+    if let Some(r) = &net.fallback_reason {
+        eprintln!("  fell back to the CPU because: {r}");
+    }
     let mut img = Planar::new(3, w, h);
     for (i, v) in img.data.iter_mut().enumerate() {
         *v = ((i * 7919) % 255) as f32 / 255.0; // non-constant content
@@ -889,12 +895,17 @@ pub fn benchmark(s: &Settings, sys: &System, model: &ModelInfo) -> Result<Bench>
         }
         Ok(())
     };
+    eprintln!("  warm-up (the first run compiles the model)...");
+    let t_warm = Instant::now();
     run(&mut net)?; // warm-up (graph compile, allocations)
+    eprintln!("  warm-up took {:.1} s", t_warm.elapsed().as_secs_f32());
     let peak = mem_now(&mut mem, sys, &t);
     let n = 3;
     let t0 = Instant::now();
-    for _ in 0..n {
+    for i in 0..n {
+        let tp = Instant::now();
         run(&mut net)?;
+        eprintln!("  pass {}/{n}: {:.2} s", i + 1, tp.elapsed().as_secs_f32());
     }
     let fps = n as f32 / t0.elapsed().as_secs_f32().max(1e-3);
     let mp = (w * h) as f32 / 1e6;

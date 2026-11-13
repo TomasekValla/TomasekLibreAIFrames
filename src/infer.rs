@@ -279,12 +279,24 @@ fn max_pixels(ai: Ai) -> Option<usize> {
 fn session(env: &ort::environment::Environment, path: &Path, t: &Target, ai: Ai) -> Result<Session> {
     let err = |e: ort::Error<ort::session::builder::SessionBuilder>| anyhow!("{e}");
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    Session::builder(env)?
+    let mut b = Session::builder(env)?
         .with_execution_providers(backend::providers(ai, t.device, &t.cache_dir))
         .map_err(err)?
-        // DirectML requires memory patterns and parallel execution off; harmless elsewhere.
-        .with_memory_pattern(ai != Ai::DirectMl)
-        .map_err(err)?
+        // DirectML requires memory patterns off; WebGPU and CoreML get fixed shapes below, keep it off there too.
+        .with_memory_pattern(matches!(ai, Ai::Cpu | Ai::Cuda | Ai::TensorRt | Ai::MiGraphX))
+        .map_err(err)?;
+    // CoreML and WebGPU fail on models whose image size is open: CoreML cannot compile "unbounded" inputs
+    // (falls back to the CPU at 0.02 fps), WebGPU reuses buffers of the wrong size. Fixing the size turns
+    // the model into a fixed-tile model; the tiling handles the rest. Unnamed sizes stay open.
+    if let Some(n) = static_tile(ai) {
+        for d in ["batch", "batch_size", "N", "n"] {
+            b = b.with_dimension_override(d, 1).map_err(err)?;
+        }
+        for d in ["height", "width", "H", "W", "h", "w"] {
+            b = b.with_dimension_override(d, n as i64).map_err(err)?;
+        }
+    }
+    b
         .with_parallel_execution(false)
         .map_err(err)?
         .with_intra_threads(if ai == Ai::Cpu { threads } else { threads.min(4) })
@@ -293,6 +305,18 @@ fn session(env: &ort::environment::Environment, path: &Path, t: &Target, ai: Ai)
         .map_err(err)?
         .commit_from_file(path)
         .map_err(|e| anyhow!("{}: {e}", ai.short()))
+}
+
+/// Fixed tile size for backends that need static shapes (CoreML, WebGPU). TLAF_STATIC_TILE=N forces it on
+/// any backend (for testing), 0 turns it off.
+fn static_tile(ai: Ai) -> Option<usize> {
+    let forced: Option<usize> = std::env::var("TLAF_STATIC_TILE").ok().and_then(|v| v.parse().ok());
+    let n = match forced {
+        Some(n) => n,
+        None if matches!(ai, Ai::CoreMl | Ai::WebGpu) => 768,
+        None => return None,
+    };
+    (n > 0).then_some(n.div_ceil(64) * 64)
 }
 
 fn opt_level(_ai: Ai) -> GraphOptimizationLevel {

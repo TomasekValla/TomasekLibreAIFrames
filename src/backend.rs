@@ -93,7 +93,14 @@ pub fn providers(ai: Ai, device: i32, cache_dir: &std::path::Path) -> Vec<ort::e
         #[cfg(target_os = "macos")]
         Ai::CoreMl => vec![ort::ep::CoreML::default()
             .with_model_format(ort::ep::coreml::ModelFormat::MLProgram)
-            .with_compute_units(ort::ep::coreml::ComputeUnits::All)
+            // GPU + CPU: compiling for the Neural Engine took minutes and gigabytes of memory per model on an
+            // M4 and still failed. TLAF_COREML_UNITS=all|ane|gpu|cpu to experiment.
+            .with_compute_units(match std::env::var("TLAF_COREML_UNITS").ok().as_deref() {
+                Some("all") => ort::ep::coreml::ComputeUnits::All,
+                Some("ane") => ort::ep::coreml::ComputeUnits::CPUAndNeuralEngine,
+                Some("cpu") => ort::ep::coreml::ComputeUnits::CPUOnly,
+                _ => ort::ep::coreml::ComputeUnits::CPUAndGPU,
+            })
             .with_model_cache_dir(cache_dir.join("coreml").to_string_lossy())
             .build()
             .error_on_failure()],
