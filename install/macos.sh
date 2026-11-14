@@ -37,6 +37,15 @@ curl -fsSL -o "$tmp/$name.sha256" "$base/$name.sha256"
 (cd "$tmp" && shasum -a 256 -c "$name.sha256" >/dev/null) || { echo "Checksum mismatch, nothing was installed." >&2; exit 1; }
 echo "Checksum verified."
 
+# A running copy keeps the old version alive (and "open" would just wake it), so close it first.
+# Process names are cut to 16 characters, so match the program path instead.
+running() { pgrep -f "/$APP.app/Contents/MacOS/$APP" >/dev/null 2>&1; }
+if running; then
+    echo "Closing the running $APP..."
+    osascript -e "quit app \"$APP\"" >/dev/null 2>&1 || true
+    for i in 1 2 3 4 5 6 7 8 9 10; do running || break; sleep 1; done
+    if running; then pkill -f "/$APP.app/Contents/MacOS/$APP" 2>/dev/null || true; sleep 1; fi
+fi
 mkdir -p "$HOME/Applications"
 (cd "$tmp" && ditto -x -k "$name" unpacked)
 rm -rf "$HOME/Applications/$APP.app"

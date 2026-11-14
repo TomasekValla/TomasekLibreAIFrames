@@ -105,6 +105,8 @@ pub fn asset_name() -> Option<&'static str> {
         Some("TomasekLibreAIFrames-linux-x64-rocm.tar.gz")
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Some("TomasekLibreAIFrames-linux-x64-cpu.tar.gz")
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some("TomasekLibreAIFrames-macos-apple-silicon.zip")
     } else {
         None
     }
@@ -114,8 +116,23 @@ pub fn asset_name() -> Option<&'static str> {
 pub fn install_mode() -> InstallMode {
     let Ok(exe) = std::env::current_exe() else { return InstallMode::Manual };
     let Some(dir) = exe.parent() else { return InstallMode::Manual };
-    if cfg!(target_os = "macos") || asset_name().is_none() {
+    if asset_name().is_none() {
         return InstallMode::Manual;
+    }
+    // macOS: the whole .app bundle is replaced; its folder must be writable, and not a disk image or a
+    // read-only "translocated" copy that macOS runs apps from when they were opened from Downloads.
+    if cfg!(target_os = "macos") {
+        return match mac_bundle() {
+            Some(b) => {
+                let s = b.to_string_lossy();
+                if s.contains("/AppTranslocation/") || s.starts_with("/Volumes/") || !b.parent().is_some_and(dir_writable) {
+                    InstallMode::Manual
+                } else {
+                    InstallMode::ReplaceFiles
+                }
+            }
+            None => InstallMode::Manual,
+        };
     }
     // Linux packages in /usr are managed by the package manager.
     if cfg!(target_os = "linux") && exe.starts_with("/usr/") && !exe.starts_with("/usr/local/") {
@@ -126,6 +143,13 @@ pub fn install_mode() -> InstallMode {
     } else {
         InstallMode::Manual
     }
+}
+
+/// The .app bundle this program runs from (…/TomasekLibreAIFrames.app/Contents/MacOS/TomasekLibreAIFrames).
+fn mac_bundle() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let b = exe.ancestors().nth(3)?.to_path_buf();
+    b.extension().is_some_and(|e| e == "app").then_some(b)
 }
 
 fn dir_writable(dir: &Path) -> bool {
@@ -296,14 +320,23 @@ pub fn apply(info: &UpdateInfo, archive: &Path) -> Result<(), String> {
         return Ok(());
     }
     install_files(archive)?;
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    std::process::Command::new(&exe).arg("--after-update").spawn().map_err(|e| e.to_string())?;
+    if cfg!(target_os = "macos") {
+        // Start the new bundle as its own app (-n), not by waking this one.
+        let b = mac_bundle().ok_or("not running from an app bundle")?;
+        std::process::Command::new("open").arg("-n").arg(&b).args(["--args", "--after-update"]).spawn().map_err(|e| e.to_string())?;
+    } else {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        std::process::Command::new(&exe).arg("--after-update").spawn().map_err(|e| e.to_string())?;
+    }
     crate::instance::release();
     std::process::exit(0)
 }
 
 /// Replace the program's files with the ones from the archive (old ones are kept as *.old until the next start).
 pub fn install_files(archive: &Path) -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        return install_bundle(archive);
+    }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let app_dir = exe.parent().ok_or("no program folder")?.to_path_buf();
     let staging = update_dir().join("new");
@@ -350,6 +383,39 @@ fn rollback(done: &[(PathBuf, PathBuf)]) {
 }
 
 /// Unpack the program files (flat) from a .zip or .tar.gz into `dest`.
+/// macOS: swap the whole .app for the one in the zip. ditto keeps permissions and the code signature;
+/// the old bundle is moved into the update folder, which the next start deletes.
+fn install_bundle(archive: &Path) -> Result<(), String> {
+    let bundle = mac_bundle().ok_or("not running from an app bundle")?;
+    let staging = update_dir().join("new");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    let ok = std::process::Command::new("ditto").args(["-x", "-k"]).arg(archive).arg(&staging).status().map_err(|e| e.to_string())?.success();
+    if !ok {
+        return Err("could not unpack the update".into());
+    }
+    let new_app = std::fs::read_dir(&staging)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "app"))
+        .ok_or_else(|| crate::tr!("V archivu aktualizace chybí program.", "The update archive does not contain the program.").to_string())?;
+    let old = update_dir().join("old.app");
+    let _ = std::fs::remove_dir_all(&old);
+    // rename within one volume, mv as the fallback when the bundle lives on another one
+    let mv = |a: &Path, b: &Path| -> bool {
+        std::fs::rename(a, b).is_ok() || std::process::Command::new("mv").arg(a).arg(b).status().is_ok_and(|s| s.success())
+    };
+    if !mv(&bundle, &old) {
+        return Err("could not move the old version aside".into());
+    }
+    if !mv(&new_app, &bundle) {
+        let _ = mv(&old, &bundle);
+        return Err("could not put the new version in place".into());
+    }
+    Ok(())
+}
+
 fn unpack(archive: &Path, dest: &Path) -> Result<Vec<PathBuf>, String> {
     let mut out = Vec::new();
     let name = archive.to_string_lossy().to_lowercase();

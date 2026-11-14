@@ -41,7 +41,15 @@ try {
     if ($want -ne $got) { throw "Checksum mismatch, nothing was installed." }
     Write-Host "Checksum verified."
 
-    Get-Process $app -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$dest\*" } | Stop-Process -Force
+    # A running copy (from anywhere) keeps the old version alive: the new one would hand over to it
+    # and exit. Ask it to close, give it 10 s, then end it.
+    $running = @(Get-Process $app -ErrorAction SilentlyContinue)
+    if ($running.Count -gt 0) {
+        Write-Host "Closing the running $app..."
+        $running | ForEach-Object { $null = $_.CloseMainWindow() }
+        for ($i = 0; $i -lt 10 -and @(Get-Process $app -ErrorAction SilentlyContinue).Count -gt 0; $i++) { Start-Sleep 1 }
+        Get-Process $app -ErrorAction SilentlyContinue | Stop-Process -Force
+    }
     Expand-Archive $zip -DestinationPath $tmp -Force
     $src = Join-Path $tmp "$app-windows-x64"
     New-Item -ItemType Directory -Force $dest | Out-Null

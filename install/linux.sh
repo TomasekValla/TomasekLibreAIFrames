@@ -46,6 +46,15 @@ echo "Checksum verified."
 
 dest="${XDG_DATA_HOME:-$HOME/.local/share}/$APP/app"
 bin="$HOME/.local/bin"
+# A running copy keeps the old version alive, so close it first. Process names are cut to 15
+# characters, so match a command line that starts with a path ending in the program name.
+pat="^[^ ]*/$APP( |$)"
+if pgrep -f "$pat" >/dev/null 2>&1; then
+    echo "Closing the running $APP..."
+    pkill -TERM -f "$pat" 2>/dev/null || true
+    for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -f "$pat" >/dev/null 2>&1 || break; sleep 1; done
+    pkill -KILL -f "$pat" 2>/dev/null || true
+fi
 mkdir -p "$dest" "$bin"
 tar -xzf "$tmp/$name" -C "$tmp"
 cp -rf "$tmp/$APP-linux-x64-$variant/." "$dest/"
