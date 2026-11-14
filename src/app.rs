@@ -122,7 +122,7 @@ impl App {
         theme::apply(&cc.egui_ctx, s.theme.is_dark(&cc.egui_ctx));
         let (tx, rx) = channel();
         let sys = hw::detect();
-        let models = models::scan(Path::new(&s.models_dir));
+        let models = models::scan_all(Path::new(&s.models_dir));
         let saved = serde_json::to_string(&s).unwrap_or_default();
         let show_setup = !s.setup_done;
         let mut app = Self {
@@ -226,7 +226,7 @@ impl App {
     }
 
     pub fn rescan_models(&mut self) {
-        self.models = models::scan(Path::new(&self.s.models_dir));
+        self.models = models::scan_all(Path::new(&self.s.models_dir));
         self.scales.clear();
         self.fix_model_choices();
     }
@@ -544,7 +544,7 @@ impl App {
         }
         let id = self.s.upscale.model.clone();
         self.scales.insert(id.clone(), Err("detecting...".into()));
-        let path = Path::new(&self.s.models_dir).join(&id);
+        let path = models::resolve(Path::new(&self.s.models_dir), &id).unwrap_or_else(|_| Path::new(&self.s.models_dir).join(&id));
         let (tx, t, ctx2) = (self.tx.clone(), pipeline::target(&self.s, &self.sys), ctx.clone());
         std::thread::spawn(move || {
             let r = pipeline::model_scale(&path, &t).map_err(|e| e.to_string());

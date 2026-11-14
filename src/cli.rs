@@ -171,7 +171,7 @@ pub fn run() -> i32 {
         }
     }
     let mut code = 0;
-    let all = models::scan(std::path::Path::new(&s.models_dir));
+    let all = models::scan_all(std::path::Path::new(&s.models_dir));
     for id in bench {
         match all.iter().find(|m| m.id == id) {
             None => {

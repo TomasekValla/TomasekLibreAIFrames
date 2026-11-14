@@ -168,6 +168,46 @@ pub struct ModelInfo {
 }
 
 /// Installed models, best quality first within each kind.
+/// Where a model file really is: the models folder from the settings, else the default models folder,
+/// else a file of the same name anywhere below either of them. The error names every place it looked.
+pub fn resolve(models_dir: &Path, id: &str) -> Result<PathBuf> {
+    let default = crate::settings::default_models_dir();
+    let mut dirs = vec![models_dir.to_path_buf()];
+    if default != models_dir {
+        dirs.push(default);
+    }
+    for d in &dirs {
+        let p = d.join(id);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    let file = Path::new(id).file_name().map(|f| f.to_os_string());
+    for d in &dirs {
+        if let Some(m) = scan(d).into_iter().find(|m| m.path.file_name().map(|f| f.to_os_string()) == file) {
+            return Ok(m.path);
+        }
+    }
+    let name = entry(id).map(|e| e.name.to_string()).unwrap_or_else(|| id.to_string());
+    let looked: Vec<String> = dirs.iter().map(|d| d.join(id).display().to_string()).collect();
+    Err(anyhow!("{name} is not downloaded (looked for {}). Download it in Models.", looked.join(" and ")))
+}
+
+/// Models in the folder from the settings plus the default models folder (same places resolve() looks).
+pub fn scan_all(models_dir: &Path) -> Vec<ModelInfo> {
+    let mut out = scan(models_dir);
+    let default = crate::settings::default_models_dir();
+    if default != models_dir {
+        for m in scan(&default) {
+            if !out.iter().any(|o| o.id == m.id) {
+                out.push(m);
+            }
+        }
+        out.sort_by(|a, b| b.quality.unwrap_or(-1.0).total_cmp(&a.quality.unwrap_or(-1.0)).then(a.name.cmp(&b.name)));
+    }
+    out
+}
+
 pub fn scan(dir: &Path) -> Vec<ModelInfo> {
     let mut out = Vec::new();
     walk(dir, dir, &mut out);

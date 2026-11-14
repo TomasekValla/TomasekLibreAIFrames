@@ -240,20 +240,14 @@ impl Nets {
         let pad = s.perf.pad_multiple.max(1) as usize;
         let mut n = Nets { up: None, it: None, target, pad };
         if want_up && s.upscale.enabled {
-            let p = models_dir.join(&s.upscale.model);
-            if !p.is_file() {
-                return Err(anyhow!("upscale model not found: {}", s.upscale.model));
-            }
+            let p = models::resolve(models_dir, &s.upscale.model)?;
             // Upscalers only need padding to a small multiple.
             let mut net = take_net(&p, &n.target, 8)?;
             net.set_budget_px(budget_px(s, sys, &s.upscale.model, net.used));
             n.up = Some((p.clone(), net));
         }
         if want_it && s.interp.enabled {
-            let p = models_dir.join(&s.interp.model);
-            if !p.is_file() {
-                return Err(anyhow!("interpolation model not found: {}", s.interp.model));
-            }
+            let p = models::resolve(models_dir, &s.interp.model)?;
             let mut net = take_net(&p, &n.target, pad)?;
             net.set_budget_px(budget_px(s, sys, &s.interp.model, net.used));
             n.it = Some((p.clone(), net));
@@ -396,7 +390,7 @@ fn streams_for_job(s: &Settings, sys: &System, plan: &Plan) -> usize {
     if s.perf.streams > 0 {
         return s.perf.streams as usize;
     }
-    let all = models::scan(Path::new(&s.models_dir));
+    let all = models::scan_all(Path::new(&s.models_dir));
     let up = all.iter().find(|m| m.id == s.upscale.model);
     let it = all.iter().find(|m| m.id == s.interp.model);
     let one = estimate(&Settings { perf: crate::settings::Perf { streams: 1, ..s.perf.clone() }, ..s.clone() }, sys, plan, up, it);
@@ -407,10 +401,10 @@ fn streams_for_job(s: &Settings, sys: &System, plan: &Plan) -> usize {
     let dir = Path::new(&s.models_dir);
     let mut keep = Vec::new();
     if s.upscale.enabled {
-        keep.push((dir.join(&s.upscale.model), t.ai, t.device, 8));
+        keep.push((models::resolve(dir, &s.upscale.model).unwrap_or_else(|_| dir.join(&s.upscale.model)), t.ai, t.device, 8));
     }
     if s.interp.enabled {
-        keep.push((dir.join(&s.interp.model), t.ai, t.device, s.perf.pad_multiple.max(1) as usize));
+        keep.push((models::resolve(dir, &s.interp.model).unwrap_or_else(|_| dir.join(&s.interp.model)), t.ai, t.device, s.perf.pad_multiple.max(1) as usize));
     }
     let cached = keep_only_models(&keep) as u64;
     let free = if t.ai == Ai::Cpu || sys.unified_memory { None } else { crate::hw::vram_free_for_app(t.device).map(|f| f + cached * per) };
@@ -1042,7 +1036,7 @@ pub fn with_resolved_order(s: &Settings, plan: &Plan) -> Settings {
     if s.order != Order::Auto {
         return s.clone();
     }
-    let all = models::scan(Path::new(&s.models_dir));
+    let all = models::scan_all(Path::new(&s.models_dir));
     let up = all.iter().find(|m| m.id == s.upscale.model);
     let it = all.iter().find(|m| m.id == s.interp.model);
     Settings { order: resolve_order(s, plan, up, it).0, ..s.clone() }
